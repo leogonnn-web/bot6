@@ -62,23 +62,29 @@ class WebSocketListener:
         try:
             while self.ws_running:
                 try:
-                    tickers = await self.ws_exchange.watch_tickers(symbols)
+                    # Bybit doesn't support watch_tickers() for multiple symbols
+                    # Use individual watch_ticker() calls for each symbol
+                    for symbol in symbols:
+                        try:
+                            ticker = await self.ws_exchange.watch_ticker(symbol)
+                            
+                            # Thread-safe update of prices
+                            with self.price_lock:
+                                self.latest_prices[symbol] = {
+                                    'ask': safe_float(ticker.get('ask')),
+                                    'bid': safe_float(ticker.get('bid')),
+                                    'last': safe_float(ticker.get('last')),
+                                    'timestamp': time.time()
+                                }
+                            
+                            # Thread-safe update of timestamp
+                            with self.update_lock:
+                                self.last_update_time[symbol] = time.time()
+                        except Exception as e:
+                            logger.warning(f"WebSocket error for {symbol}: {e}")
                     
-                    # Thread-safe update of prices
-                    with self.price_lock:
-                        for symbol, ticker in tickers.items():
-                            self.latest_prices[symbol] = {
-                                'ask': safe_float(ticker.get('ask')),
-                                'bid': safe_float(ticker.get('bid')),
-                                'last': safe_float(ticker.get('last')),
-                                'timestamp': time.time()
-                            }
-                    
-                    # Thread-safe update of timestamps
-                    with self.update_lock:
-                        current_time = time.time()
-                        for symbol in symbols:
-                            self.last_update_time[symbol] = current_time
+                    # Small delay between polling cycles
+                    await asyncio.sleep(0.5)
                     
                 except Exception as e:
                     logger.error(f"WebSocket error: {e}")

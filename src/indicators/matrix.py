@@ -325,10 +325,14 @@ class VolumeProfileAnalyzer:
     """Volume Profile and POC analysis"""
     
     @staticmethod
-    def calculate_poc(ohlcv_data: List[List], bins: int = 20) -> Tuple[float, Dict]:
-        """Calculate Point of Control"""
+    def calculate_poc(ohlcv_data: List[List], bins: int = 50, min_volume_threshold: float = 0.1) -> Tuple[float, Dict]:
+        """
+        Calculate Point of Control with noise filtering
+        - bins: 50 bins for better granularity (was 20)
+        - min_volume_threshold: Filter out bins with <10% of max volume
+        """
         try:
-            if len(ohlcv_data) < 5:
+            if len(ohlcv_data) < 20:  # Increased minimum to 20 candles
                 return 0.0, {}
             
             highs = np.array([float(c[2]) for c in ohlcv_data])
@@ -336,9 +340,17 @@ class VolumeProfileAnalyzer:
             closes = np.array([float(c[4]) for c in ohlcv_data])
             volumes = np.array([float(c[5]) if c[5] else 0 for c in ohlcv_data])
             
-            typical_prices = (highs + lows + closes) / 3
+            # Use VWAP instead of typical price for accuracy
+            typical_prices = (highs + lows + 2 * closes) / 4  # VWAP formula
             price_min = np.min(lows)
             price_max = np.max(highs)
+            
+            # Adaptive number of bins based on price range
+            price_range = price_max - price_min
+            if price_range > 0:
+                adaptive_bins = min(100, max(30, int(price_range / price_min * 20)))
+                bins = adaptive_bins
+            
             bin_edges = np.linspace(price_min, price_max, bins + 1)
             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
             
@@ -348,13 +360,46 @@ class VolumeProfileAnalyzer:
                 bin_idx = np.clip(bin_idx, 0, bins - 1)
                 bin_volumes[bin_idx] += volumes[i]
             
-            poc_idx = np.argmax(bin_volumes)
+            # Noise filtering - remove bins with low volume
+            max_bin_volume = np.max(bin_volumes)
+            noise_threshold = max_bin_volume * min_volume_threshold
+            bin_volumes_filtered = np.where(bin_volumes < noise_threshold, 0, bin_volumes)
+            
+            # Find POC among filtered bins
+            if np.sum(bin_volumes_filtered) > 0:
+                poc_idx = np.argmax(bin_volumes_filtered)
+            else:
+                poc_idx = np.argmax(bin_volumes)  # Fallback
+            
             poc_price = bin_centers[poc_idx]
+            
+            # Calculate Value Area (VAH/VAL) - 70% of volume
+            sorted_indices = np.argsort(bin_volumes)[::-1]
+            cumulative_volume = 0.0
+            total_volume = np.sum(bin_volumes)
+            va_bins = []
+            
+            for idx in sorted_indices:
+                cumulative_volume += bin_volumes[idx]
+                va_bins.append(idx)
+                if cumulative_volume >= total_volume * 0.7:
+                    break
+            
+            if va_bins:
+                vah_price = bin_centers[max(va_bins)]
+                val_price = bin_centers[min(va_bins)]
+            else:
+                vah_price = poc_price
+                val_price = poc_price
             
             return float(poc_price), {
                 'poc_price': float(poc_price),
                 'poc_volume': float(bin_volumes[poc_idx]),
-                'total_volume': float(np.sum(volumes))
+                'total_volume': float(np.sum(volumes)),
+                'vah_price': float(vah_price),
+                'val_price': float(val_price),
+                'bins_used': bins,
+                'noise_filtered': True
             }
         except Exception as e:
             logger.error(f"POC calculation error: {e}")
@@ -421,13 +466,31 @@ class VolumeProfileAnalyzer:
 class SignalOptimizer:
     """Signal aggregation and conflict resolution"""
     
+    @classmethod
+    def from_config(cls, config_dict: dict, market_config: dict = None, tank_mode: bool = False):
+        signal_weights = config_dict.get('signal_weights', {})
+        min_confidence = config_dict.get('min_confidence_threshold', 50.0)
+        strong_buy = config_dict.get('strong_buy_threshold', None)
+        use_conflict = config_dict.get('use_conflict_detection', True)
+        volatility_adj = config_dict.get('volatility_adjusted', True)
+        
+        return cls(
+            signal_weights=signal_weights,
+            min_confidence_threshold=min_confidence,
+            strong_buy_threshold=strong_buy,
+            use_conflict_detection=use_conflict,
+            volatility_adjusted=volatility_adj,
+            tank_mode=tank_mode
+        )
+    
     def __init__(
         self,
         signal_weights: Optional[dict] = None,
         min_confidence_threshold: float = 50.0,
         strong_buy_threshold: Optional[float] = None,
         use_conflict_detection: bool = True,
-        volatility_adjusted: bool = True
+        volatility_adjusted: bool = True,
+        tank_mode: bool = False
     ):
         default_weights = {
             'rsi': 2.0,
@@ -442,6 +505,7 @@ class SignalOptimizer:
         self.strong_buy_threshold = float(strong_buy_threshold) if strong_buy_threshold else max(75.0, self.min_confidence_threshold + 15.0)
         self.use_conflict_detection = use_conflict_detection
         self.volatility_adjusted = volatility_adjusted
+        self.tank_mode = tank_mode
         self.max_possible_score = sum(self.signal_weights.values())
     
     def aggregate_signals(
@@ -459,6 +523,34 @@ class SignalOptimizer:
             score = 0.0
             signals_fired = []
             conflicts = []
+            
+            # TANK MODE: Hard block on Downtrend
+            if self.tank_mode:
+                # Block LONG if Ichimoku shows Downtrend
+                if ichimoku_signal:
+                    if not ichimoku_signal.get('cloud_bullish') or not ichimoku_signal.get('price_above_cloud'):
+                        return {
+                            'recommendation': 'SKIP',
+                            'confidence': 0.0,
+                            'score': 0.0,
+                            'max_score': float(self.max_possible_score),
+                            'signals_fired': [],
+                            'conflicts': ['Ichimoku Downtrend - TANK MODE BLOCK'],
+                            'tank_block_reason': 'Ichimoku Downtrend'
+                        }
+                
+                # Block LONG if EMA shows Downtrend
+                ema_alignment = rsi_signal.get('ema_alignment', 0)
+                if ema_alignment <= -1:
+                    return {
+                        'recommendation': 'SKIP',
+                        'confidence': 0.0,
+                        'score': 0.0,
+                        'max_score': float(self.max_possible_score),
+                        'signals_fired': [],
+                        'conflicts': ['EMA Downtrend - TANK MODE BLOCK'],
+                        'tank_block_reason': 'EMA Downtrend'
+                    }
             
             # RSI
             if rsi_signal.get('oversold'):
@@ -518,9 +610,22 @@ class SignalOptimizer:
                     score += 1.0
                     signals_fired.append("Price near volume support")
             
-            # Conflict detection
-            if self.use_conflict_detection and len(conflicts) >= 2:
-                score *= 0.7
+            # TANK MODE: Hard conflict detection
+            if self.tank_mode:
+                if len(conflicts) >= 1:
+                    return {
+                        'recommendation': 'SKIP',
+                        'confidence': 0.0,
+                        'score': 0.0,
+                        'max_score': float(self.max_possible_score),
+                        'signals_fired': signals_fired,
+                        'conflicts': conflicts,
+                        'tank_block_reason': f'Conflict detected: {conflicts[0]}'
+                    }
+            else:
+                # Normal mode
+                if self.use_conflict_detection and len(conflicts) >= 2:
+                    score *= 0.7
             
             # Volatility adjustment
             if self.volatility_adjusted and volatility_level > 1.3:
@@ -529,12 +634,21 @@ class SignalOptimizer:
             confidence = (score / self.max_possible_score) * 100
             confidence = max(0, min(100, confidence))
             
-            if confidence >= self.strong_buy_threshold:
-                recommendation = "STRONG_BUY"
-            elif confidence >= self.min_confidence_threshold:
-                recommendation = "BUY"
+            # TANK MODE: 85% threshold for STRONG_BUY
+            if self.tank_mode:
+                if confidence >= 85.0:
+                    recommendation = "STRONG_BUY"
+                elif confidence >= 75.0:
+                    recommendation = "BUY"
+                else:
+                    recommendation = "SKIP"
             else:
-                recommendation = "SKIP"
+                if confidence >= self.strong_buy_threshold:
+                    recommendation = "STRONG_BUY"
+                elif confidence >= self.min_confidence_threshold:
+                    recommendation = "BUY"
+                else:
+                    recommendation = "SKIP"
             
             return {
                 'recommendation': recommendation,
@@ -703,19 +817,19 @@ class IndicatorMatrix:
 # Will be initialized with config if available, otherwise uses defaults
 analyzer = None
 
-def initialize_analyzer(config=None):
+def initialize_analyzer(config=None, tank_mode=False):
     """Initialize analyzer with config if provided"""
     global analyzer
     if config is not None:
         try:
             signal_optimizer_config = config.get_signal_optimizer_config()
             market_conditions_config = config.get_market_conditions_config()
-            optimizer = SignalOptimizer.from_config(signal_optimizer_config, market_conditions_config)
+            optimizer = SignalOptimizer.from_config(signal_optimizer_config, market_conditions_config, tank_mode=tank_mode)
             analyzer = IndicatorMatrix(optimizer=optimizer)
-            logger.info("@INDICATORS_INIT@ Analyzer initialized with config")
+            logger.info(f"@INDICATORS_INIT@ Analyzer initialized with config (TANK MODE: {tank_mode})")
         except Exception as e:
             logger.warning(f"@INDICATORS_WARN@ Failed to init with config: {e}, using defaults")
-            analyzer = IndicatorMatrix()
+            analyzer = IndicatorMatrix(optimizer=SignalOptimizer(tank_mode=tank_mode))
     else:
-        analyzer = IndicatorMatrix()
+        analyzer = IndicatorMatrix(optimizer=SignalOptimizer(tank_mode=tank_mode))
     return analyzer

@@ -22,7 +22,7 @@ from paths import HOT_SYMBOLS_FILE
 
 # New modular imports
 from api.bybit_client import BybitClient
-from indicators.matrix import analyzer
+from indicators.matrix import analyzer, initialize_analyzer
 from database.models import TradeDatabase
 from core.scanner import ScannerIntegration, DynamicSymbolManager
 
@@ -36,12 +36,13 @@ class BotState(Enum):
 
 
 class TradingBot:
-    def __init__(self):
+    def __init__(self, tank_mode: bool = False):
         logger.info("@INIT@ Initializing HYDRA v17.0 (WebSockets)...")
         self.config = config
+        self.tank_mode = tank_mode
         
-        # Initialize analyzer with config
-        initialize_analyzer(self.config)
+        # Initialize analyzer with config and tank_mode
+        initialize_analyzer(self.config, tank_mode=tank_mode)
         
         self.exchange = BybitClient()
         self.trade_db = TradeDatabase()
@@ -85,12 +86,8 @@ class TradingBot:
             logger.info("@START_SUCCESS@ HYDRA v17.0 STARTED")
             self.exchange.load_markets()
             
-            # Try to start WebSocket streaming
-            symbols = self.symbol_manager.get_symbols(refresh_scanner=False)
-            if self.exchange.ws_listener.start(symbols):
-                logger.info("@WS_MODE@ Using WebSocket streaming")
-            else:
-                logger.info("@REST_MODE@ WebSocket failed, using REST polling")
+            # Disable WebSocket - use REST polling only (ccxt.pro Bybit WebSocket not working)
+            logger.info("@REST_MODE@ Using REST polling (WebSocket disabled)")
             
             # Initial ticker update
             self._update_websocket_stream()
@@ -171,6 +168,7 @@ class TradingBot:
             else:
                 # Use REST polling if WebSocket not active
                 raw_tickers = self.exchange.fetch_tickers(symbols)
+                logger.info(f"@REST_POLL@ Fetched {len(raw_tickers)} tickers via REST")
                 for sym in symbols:
                     if sym in raw_tickers:
                         self.ws_tickers_cache[sym] = {
@@ -196,9 +194,22 @@ class TradingBot:
             logger.error(f"CSV report error: {e}")
 
     def _handle_idle_state(self):
-        if not self._check_risk_limits() or not self._check_time_session() or not self._check_balance():
+        risk_ok = self._check_risk_limits()
+        time_ok = self._check_time_session()
+        balance_ok = self._check_balance()
+        
+        if not risk_ok:
+            logger.info("@IDLE@ Risk limits check failed")
+        if not time_ok:
+            logger.info("@IDLE@ Time session check failed")
+        if not balance_ok:
+            logger.info("@IDLE@ Balance check failed")
+            
+        if not risk_ok or not time_ok or not balance_ok:
             time.sleep(5)
             return
+        
+        logger.info("@IDLE@ All checks passed, transitioning to SCANNING")
         self.state = BotState.SCANNING
 
     def _handle_scanning_state(self):
@@ -325,7 +336,9 @@ class TradingBot:
                     self.last_loss_time = time.time()
                     self._panic_sell()
                     return
-            if elapsed > self.trading_config['timeout_breakeven'] and not self.state_data['is_breakeven']:
+            adaptive_timeout = self._calculate_adaptive_breakeven_timeout(symbol)
+            if elapsed > adaptive_timeout and not self.state_data['is_breakeven']:
+                logger.info(f"@BREAKEVEN_TIMEOUT@ Adaptive timeout reached: {elapsed}s (ATR-based: {adaptive_timeout}s)")
                 self._set_breakeven()
         except Exception as e:
             logger.error(f"IN_POSITION state error: {e}")
@@ -535,6 +548,53 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Breakeven error: {e}")
 
+    def _calculate_adaptive_breakeven_timeout(self, symbol: str) -> int:
+        """
+        Calculate adaptive breakeven timeout based on ATR
+        Formula: timeout = (ATR / current_price) * 10000 * volatility_multiplier
+        """
+        try:
+            # Get ATR for last 20 candles
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
+            if len(ohlcv) < 14:
+                return 1200  # Fallback to 20 min
+            
+            # Calculate ATR
+            atr = ATRAnalyzer.calculate_atr(ohlcv, period=14)
+            current_price = safe_float(ohlcv[-1][4])
+            
+            if atr <= 0 or current_price <= 0:
+                return 1200
+            
+            # Normalize ATR as % of price
+            atr_pct = (atr / current_price) * 100
+            
+            # Base timeout: higher volatility (ATR) = faster exit needed
+            # Low volatility (<0.5%) = longer wait (up to 40 min)
+            # High volatility (>2%) = faster (up to 5 min)
+            if atr_pct < 0.5:
+                timeout_sec = 2400  # 40 minutes
+            elif atr_pct < 1.0:
+                timeout_sec = 1800  # 30 minutes
+            elif atr_pct < 1.5:
+                timeout_sec = 1200  # 20 minutes
+            elif atr_pct < 2.0:
+                timeout_sec = 900   # 15 minutes
+            else:
+                timeout_sec = 300   # 5 minutes
+            
+            # Can override via config
+            config_timeout = self.trading_config.get('breakeven_timeout_sec', None)
+            if config_timeout:
+                timeout_sec = config_timeout
+            
+            logger.debug(f"@ATR_TIMEOUT@ ATR: {atr_pct:.2f}%, Breakeven timeout: {timeout_sec}s")
+            return int(timeout_sec)
+            
+        except Exception as e:
+            logger.error(f"ATR timeout calculation error: {e}")
+            return 1200  # Fallback
+
     def _check_time_session(self) -> bool:
         if not self.trading_config.get('block_night_trading', False): return True
         current_hour = datetime.now().hour
@@ -675,7 +735,10 @@ class TradingBot:
         try:
             symbols = self.symbol_manager.get_symbols(refresh_scanner=True)
             tickers = self.ws_tickers_cache
-            if not tickers: return
+            logger.info(f"@SCAN_START@ Scanning {len(symbols)} symbols, tickers cache: {len(tickers)}")
+            if not tickers: 
+                logger.warning("@SCAN_WARN@ No tickers in cache")
+                return
             
             # Check if BTC trend detection is enabled in config
             market_config = self.config.get_market_conditions_config()
@@ -685,13 +748,13 @@ class TradingBot:
             else:
                 try:
                     btc_ohlcv_1h = self.exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=2)
-                if len(btc_ohlcv_1h) >= 2:
-                    btc_open = safe_float(btc_ohlcv_1h[-2][1])
-                    btc_close = safe_float(btc_ohlcv_1h[-1][4])
-                    btc_change_1h = ((btc_close - btc_open) / btc_open) * 100
-                    if btc_change_1h < -0.8: btc_trend = "bearish"
-                    elif btc_change_1h > 0.8: btc_trend = "bullish"
-            except: pass
+                    if len(btc_ohlcv_1h) >= 2:
+                        btc_open = safe_float(btc_ohlcv_1h[-2][1])
+                        btc_close = safe_float(btc_ohlcv_1h[-1][4])
+                        btc_change_1h = ((btc_close - btc_open) / btc_open) * 100
+                        if btc_change_1h < -0.8: btc_trend = "bearish"
+                        elif btc_change_1h > 0.8: btc_trend = "bullish"
+                except: pass
             try:
                 btc_ohlcv_15m = self.exchange.fetch_ohlcv('BTC/USDT', timeframe='5m', limit=4)
                 if len(btc_ohlcv_15m) >= 3:
@@ -704,6 +767,10 @@ class TradingBot:
                         return
             except: pass
             print(f"Scanning market... BTC Trend: [{btc_trend.upper()}] @SCAN_WS@ ", end='\r')
+            
+            # TANK MODE: Check if enabled
+            tank_mode = self.trading_config.get('tank_mode', False)
+            
             for symbol in symbols:
                 if symbol not in tickers: continue
                 try:
@@ -722,11 +789,20 @@ class TradingBot:
                         continue
                     drop = ((self.price_history[symbol][0] - price_now) / self.price_history[symbol][0]) * 100
                     if drop >= self.trading_config.get('drop_threshold', 0.65):
-                        try: ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=60)
-                        except: continue
+                        try: 
+                            ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=60)
+                        except: 
+                            continue
                         real_rvol = self._calculate_real_rvol(ohlcv)
                         min_rvol = self.trading_config.get('min_rvol_threshold', 1.5)
+                        
+                        # TANK MODE: Stricter RVOL threshold
+                        if tank_mode and real_rvol < 2.0:
+                            logger.debug(f"@TANK_FILTER@ RVOL too low for tank mode: {real_rvol:.1f}x < 2.0x")
+                            continue
+                        
                         if real_rvol < min_rvol: continue
+                        
                         if self.indicators_enabled:
                             analysis = analyzer.complete_analysis(
                                 ohlcv_data=ohlcv,
@@ -736,7 +812,21 @@ class TradingBot:
                                 btc_trend_detection_enabled=market_config.get('btc_trend_detection', True)
                             )
                             if analysis['status'] != 'ok': continue
+                            
+                            # TANK MODE: Check for tank block reason
+                            if tank_mode and 'tank_block_reason' in analysis:
+                                logger.info(f"@TANK_BLOCK@ Signal blocked: {analysis['tank_block_reason']}")
+                                continue
+                            
                             base_threshold = self.trading_config.get('min_confidence_threshold', 60.0)
+                            
+                            # TANK MODE: Higher threshold
+                            if tank_mode:
+                                base_threshold = 85.0
+                                if btc_trend == "bearish":
+                                    logger.info(f"@TANK_BTC@ BTC bearish, blocking entry")
+                                    continue
+                            
                             if analysis['recommendation'] in ['STRONG_BUY', 'BUY'] and analysis.get('confidence_score', 0) >= base_threshold:
                                 # Check BTC trend (drop filter)
                                 if not self._check_btc_trend():
@@ -747,7 +837,7 @@ class TradingBot:
                                 if btc_correlation < correlation_threshold:
                                     logger.info(f"@CORRELATION_FILTER@ {symbol} BTC correlation {btc_correlation:.2f} < {correlation_threshold}, skipping")
                                     continue
-                                logger.info(f"@SIGNAL_APPROVED@ Signal approved for {symbol} (RVOL: {real_rvol:.1f}x, BTC corr: {btc_correlation:.2f})")
+                                logger.info(f"@SIGNAL_APPROVED@ Signal approved for {symbol} (RVOL: {real_rvol:.1f}x, Confidence: {analysis.get('confidence_score', 0):.1f}%)")
                                 self._enter_trade(symbol, price_now, tickers)
                                 return
                         else:

@@ -1,0 +1,61 @@
+{
+  "trading": {
+    "slot_size": 18.0,
+    "entry_threshold": 0.75,
+    "drop_threshold": 0.65,
+    "panic_stop": 2.0,
+    "stop_loss_total": 12.0,
+    "timeout_breakeven": 1200,
+    "min_exchange_limit": 5.2,
+    "volatility_min": 0.85,
+    "spread_max": 0.10,
+    "use_dynamic_stops": true,
+    "atr_multiplier": 1.5,
+    "min_stop_pct": 1.0
+  },
+  "symbols": [
+    "NOT/USDT",
+    "TON/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "ADA/USDT"
+  ],
+  "exchange": {
+    "name": "bybit"
+  },
+  "api_retry": {
+    "max_retries": 3,
+    "retry_delay": 0.5,
+    "backoff_factor": 2.0
+  },
+  "cache": {
+    "ticker_ttl": 2,
+    "balance_ttl": 5,
+    "ohlcv_ttl": 10
+  },
+  "indicators": {
+    "enabled": true,
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "ema_fast": 9,
+    "ema_slow": 21,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "min_signal_score": 2
+  },
+  "stochastic": {
+    "enabled": true,
+    "period": 14,
+    "k_smooth": 3,
+    "d_smooth": 3
+  },
+  "scanner": {
+    "enabled": true,
+    "file": "hot_symbols.txt",
+    "cache_ttl": 600,
+    "use_priority": true
+  }
+}

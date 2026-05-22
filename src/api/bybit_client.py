@@ -280,23 +280,47 @@ class BybitClient:
             raise
     
     def amend_order(self, order_id: str, symbol: str, amount: float, price: float) -> Optional[Dict]:
-        """Amend existing order"""
-        try:
-            amt_str = self.exchange.amount_to_precision(symbol, amount)
-            price_str = self.exchange.price_to_precision(symbol, price)
-            logger.debug(f"@AMEND_ORDER@ Amend {order_id} -> {symbol} @ ${price_str}")
-            
-            return self.exchange.amend_order(
-                id=order_id,
-                symbol=symbol,
-                type='limit',
-                side='buy',
-                amount=float(amt_str),
-                price=float(price_str)
-            )
-        except Exception as e:
-            logger.error(f"@ORDER_ERROR@ Amend failed for {order_id}: {e}")
-            return None
+        """
+        Amend existing order with Rate Limit protection
+        Retries on DDOS/Rate Limit errors with exponential backoff
+        """
+        max_retries = 3
+        base_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                amt_str = self.exchange.amount_to_precision(symbol, amount)
+                price_str = self.exchange.price_to_precision(symbol, price)
+                logger.debug(f"@AMEND_ORDER@ Amend {order_id} -> {symbol} @ ${price_str} (attempt {attempt + 1}/{max_retries})")
+                
+                return self.exchange.amend_order(
+                    id=order_id,
+                    symbol=symbol,
+                    type='limit',
+                    side='buy',
+                    amount=float(amt_str),
+                    price=float(price_str)
+                )
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Check for rate limit errors
+                if any(keyword in error_str for keyword in ['rate limit', 'ddos', 'too many requests', '33004']):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(f"@RATE_LIMIT@ Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"@RATE_LIMIT@ Max retries exceeded for amend_order {order_id}")
+                        return None
+                else:
+                    # Non-rate-limit error, fail immediately
+                    logger.error(f"@ORDER_ERROR@ Amend failed for {order_id}: {e}")
+                    return None
+        
+        logger.error(f"@ORDER_ERROR@ Amend failed for {order_id} after {max_retries} retries")
+        return None
     
     def fetch_order(self, order_id: str, symbol: str) -> Dict:
         """Get order status with fallback"""
@@ -311,8 +335,8 @@ class BybitClient:
                         for order in closed_orders:
                             if order['id'] == order_id:
                                 return order
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"@ORDER_LOOKUP_WARN@ Closed orders lookup failed: {e}")
                 time.sleep(0.5)
         
         logger.warning(f"@ORDER_FALLBACK@ Order {order_id} not found, assuming closed")

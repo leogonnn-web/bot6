@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.windsurf
+*.swp
+*.swo
+
+# Python
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+
+# Go
+arb-engine/hydra-arb.exe
+arb-engine/hydra-arb
+
+# Env (keys stay on host, injected via docker-compose)
+.env
+
+# Tests (not needed in production image)
+tests/
+
+# Archives
+src_archive/
+
+# Temp
+*.log

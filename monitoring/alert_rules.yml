@@ -1,0 +1,88 @@
+groups:
+  - name: hydra_critical
+    rules:
+      # Balance critically low — bot should freeze
+      - alert: BalanceCriticallyLow
+        expr: hydra_balance_usdt < 15
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Balance below $15 — trading frozen"
+          description: "USDT balance is ${{ $value }}. Capital Router has frozen all trading."
+
+      # Balance approaching freeze threshold
+      - alert: BalanceLow
+        expr: hydra_balance_usdt < 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Balance below $25 — grid disabled, single-shot only"
+          description: "USDT balance is ${{ $value }}. Martingale grid is disabled."
+
+  - name: hydra_orders
+    rules:
+      # Order errors spike
+      - alert: OrderErrorSpike
+        expr: rate(hydra_order_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Order error rate elevated"
+          description: "{{ $labels.side }} orders failing at {{ $value | humanize }}/s ({{ $labels.error_type }})"
+
+      # Order latency too high (p95 > 5s)
+      - alert: OrderLatencyHigh
+        expr: histogram_quantile(0.95, rate(hydra_order_latency_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order latency p95 > 5s"
+          description: "p95 order latency is {{ $value | humanize }}s — possible exchange API degradation."
+
+  - name: hydra_slippage
+    rules:
+      # Slippage exceeds 0.5% (mean over 10m)
+      - alert: SlippageHigh
+        expr: rate(hydra_slippage_pct_sum[10m]) / rate(hydra_slippage_pct_count[10m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Average slippage > 0.5%"
+          description: "Mean slippage is {{ $value | humanize }}%. Consider switching to Iceberg strategy."
+
+      # Slippage exceeds 1% — critical
+      - alert: SlippageCritical
+        expr: rate(hydra_slippage_pct_sum[10m]) / rate(hydra_slippage_pct_count[10m]) > 1.0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Average slippage > 1% — CRITICAL"
+          description: "Mean slippage is {{ $value | humanize }}%. Orders are being front-run or liquidity is dangerously thin."
+
+  - name: hydra_bot_health
+    rules:
+      # Bot stuck in same state for too long
+      - alert: BotStateStuck
+        expr: changes(hydra_bot_state[30m]) == 0 and hydra_bot_state != 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bot stuck in state {{ $value }} for 30m+"
+          description: "Bot state has not changed for 30 minutes. May indicate a hung order or network issue."
+
+      # No scan cycles for 5 minutes
+      - alert: ScanCyclesStopped
+        expr: rate(hydra_scan_cycles_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Bot scan cycles stopped"
+          description: "No scan cycles in last 5 minutes. Bot may have crashed or frozen."

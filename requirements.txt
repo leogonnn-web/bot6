@@ -2,3 +2,7 @@ ccxt==4.0.96
 python-dotenv==1.0.0
 requests==2.31.0
 numpy==1.24.3
+pydantic>=2.6,<3
+pytest>=8.0
+pytest-mock>=3.14
+prometheus_client>=0.20

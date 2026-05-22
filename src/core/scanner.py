@@ -133,7 +133,7 @@ class MarketScanner:
     HYPE_MIN = 5.0
     HYPE_MAX = 200.0
     DUMP_THRESHOLD = -12.0
-    MIN_RVOL = 1.5
+    MIN_RVOL = 2.0
     SIGNAL_DEBOUNCE = 300
     CACHE_EXPIRE = 7200
     
@@ -165,8 +165,8 @@ class MarketScanner:
                     if drop_5m < self.BTC_CRASH_5M:
                         logger.warning(f"BTC CRASHING {drop_5m:.2f}% in 5min")
                         return 100
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"@SCANNER_BTC_WARN@ BTC crash check failed: {e}")
             
             return 0
         except Exception as e:
@@ -225,13 +225,21 @@ class MarketScanner:
             logger.info("Scanning spot market...")
             
             try:
+                logger.info("Fetching tickers from exchange...")
                 tickers = self.client.fetch_tickers(list(self.client.exchange.markets.keys())[:100])
-            except:
+                logger.info(f"Fetched {len(tickers)} tickers")
+            except Exception as e:
+                logger.error(f"Error fetching tickers: {e}")
                 tickers = self.client.fetch_tickers()
             
             found_count = 0
+            total_symbols = len(tickers)
+            processed = 0
             
             for symbol, data in tickers.items():
+                processed += 1
+                if processed % 20 == 0:
+                    logger.info(f"Progress: {processed}/{total_symbols} symbols analyzed")
                 try:
                     if '/USDT' not in symbol or symbol in self.blacklist or symbol in self.delisted_cache:
                         continue

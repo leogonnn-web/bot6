@@ -3,10 +3,33 @@ Configuration management with environment support and new v16.0 features
 Supports: Trading params, Indicators, Scanner, ATR stops
 """
 import json
+import logging
 import os
+import time
 from dotenv import load_dotenv
 
 from paths import DEFAULT_CONFIG, ENV_FILE
+
+# Pydantic validation is optional: if the library is missing we degrade
+# gracefully and just skip validation (with a warning log). The lazy import
+# also avoids a hard dependency at import time for unit tests.
+try:
+    from config_models import validate_config, ConfigValidationError  # type: ignore
+    _PYDANTIC_AVAILABLE = True
+except Exception as _imp_err:  # pragma: no cover - import-time fallback
+    _PYDANTIC_AVAILABLE = False
+    _IMPORT_ERR_MSG = str(_imp_err)
+
+# Use the project's logger if it has been configured; otherwise fall back to
+# a stdlib logger so this module can be imported standalone (e.g. in tests).
+try:
+    from logger_setup import logger  # type: ignore
+except Exception:  # pragma: no cover
+    logger = logging.getLogger(__name__)
+
+
+# TTL cache for config reads to avoid hammering disk IO in hot path
+_CONFIG_TTL_SECONDS = 2.0
 
 
 class Config:
@@ -16,13 +39,25 @@ class Config:
         load_dotenv(ENV_FILE)
         
         self.config_file = config_file or DEFAULT_CONFIG
+        self._cache_ts = 0.0
+        self._cache_payload = None
         self.config = self._load_config()
     
     def _load_config(self) -> dict:
+        """Load configuration with TTL cache (2s) to skip repeated disk IO."""
+        now = time.time()
+        if self._cache_payload is not None and (now - self._cache_ts) < _CONFIG_TTL_SECONDS:
+            return self._cache_payload
+        payload = self._load_config_uncached()
+        self._cache_payload = payload
+        self._cache_ts = now
+        return payload
+
+    def _load_config_uncached(self) -> dict:
         """Load configuration from JSON file"""
         default_config = {
             "trading": {
-                "slot_size": 18.0,
+                "slot_size": 12.0,
                 "entry_threshold": 0.75,
                 "drop_threshold": 0.65,
                 "panic_stop": 2.0,
@@ -43,7 +78,7 @@ class Config:
                 "partial_tp_activation_pct": 1.0,
                 "partial_tp_size_pct": 50.0,
                 "move_to_breakeven": True,
-                "trailing_callback_pct": 0.5
+                "trailing_callback_pct": 0.8
             },
             "symbols": ["NOT/USDT", "TON/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"],
             "exchange": {"name": "bybit"},
@@ -82,7 +117,30 @@ class Config:
                     self._deep_merge(default_config, loaded)
             except Exception as e:
                 print(f"Warning: Could not load config file: {e}")
-        
+
+        # ------------------------------------------------------------------
+        # Pydantic validation (Level 3 — Industrial packaging)
+        # ------------------------------------------------------------------
+        # Validate the FULLY-MERGED config so we catch typos in the user's
+        # JSON overlay AND in the in-code defaults. On failure: log a clear
+        # @CONFIG_VALIDATION_ERROR@ marker and re-raise so main.py exits.
+        if _PYDANTIC_AVAILABLE:
+            try:
+                default_config = validate_config(default_config)
+            except ConfigValidationError as ve:
+                logger.critical(
+                    "@CONFIG_VALIDATION_ERROR@ Configuration is invalid; bot cannot start.\n%s",
+                    ve,
+                )
+                raise
+        else:
+            logger.warning(
+                "@CONFIG_VALIDATION_SKIPPED@ pydantic is not installed (%s); "
+                "running without schema validation. Install via: "
+                "pip install 'pydantic>=2.6,<3'",
+                _IMPORT_ERR_MSG,
+            )
+
         return default_config
     
     def _deep_merge(self, base: dict, updates: dict) -> None:

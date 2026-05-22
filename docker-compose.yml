@@ -1,0 +1,109 @@
+# ─────────────────────────────────────────────────────────
+# TRIADA Trading System — Docker Compose
+# Components: Python Bot + Go Arb Engine + Prometheus + Grafana
+# ─────────────────────────────────────────────────────────
+
+services:
+  # ── Python Trading Bot ──
+  hydra-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hydra-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - CAPITAL_STATE_FILE=/app/shared/state/capital_state.json
+    volumes:
+      - shared-data:/app/shared/state
+      - ./shared/config.json:/app/shared/config.json:ro
+    ports:
+      - "9090:9090"   # Prometheus metrics
+    networks:
+      - triada
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/metrics')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── Go Arbitrage Engine ──
+  hydra-arb:
+    build:
+      context: ./arb-engine
+      dockerfile: Dockerfile
+    container_name: hydra-arb
+    restart: unless-stopped
+    depends_on:
+      hydra-bot:
+        condition: service_healthy
+    volumes:
+      - shared-data:/data
+    ports:
+      - "9091:9091"   # Prometheus metrics
+    networks:
+      - triada
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9091/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Prometheus ──
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: triada-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9092:9090"   # Prometheus UI (remapped to avoid conflict with bot)
+    networks:
+      - triada
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=1GB"
+
+  # ── Grafana ──
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: triada-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-triada2024}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana_dashboard.json:/var/lib/grafana/dashboards/triada.json:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"   # Grafana UI
+    networks:
+      - triada
+
+volumes:
+  shared-data:        # capital_state.json exchange between bot ↔ arb
+  prometheus-data:
+  grafana-data:
+
+networks:
+  triada:
+    driver: bridge

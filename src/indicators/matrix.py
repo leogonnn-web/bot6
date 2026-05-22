@@ -23,6 +23,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 import sys
 import os
+import time
 
 # Add shared to path for logger
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'shared')))
@@ -82,6 +83,45 @@ class EMAAnalyzer:
         except Exception as e:
             logger.error(f"EMA calculation error: {e}")
             return 0.0
+    
+    @staticmethod
+    def check_trend_filter(ohlcv_data: List[List], current_price: float) -> Dict:
+        """
+        Check trend filter using EMA 50 and 200
+        Returns: {'allow_long': bool, 'ema50': float, 'ema200': float, 'trend': str}
+        """
+        try:
+            if len(ohlcv_data) < 200:
+                return {'allow_long': True, 'ema50': 0.0, 'ema200': 0.0, 'trend': 'insufficient_data'}
+            
+            ema50 = EMAAnalyzer.calculate(ohlcv_data, 50)
+            ema200 = EMAAnalyzer.calculate(ohlcv_data, 200)
+            
+            # Trend filter: don't trade when price below EMA 200
+            price_above_ema200 = current_price > ema200
+            ema50_above_ema200 = ema50 > ema200
+            
+            if not price_above_ema200:
+                trend = 'downtrend'
+                allow_long = False
+            elif ema50_above_ema200:
+                trend = 'uptrend_strong'
+                allow_long = True
+            else:
+                trend = 'uptrend_weak'
+                allow_long = True
+            
+            return {
+                'allow_long': allow_long,
+                'ema50': float(ema50),
+                'ema200': float(ema200),
+                'trend': trend,
+                'price_above_ema200': price_above_ema200,
+                'ema50_above_ema200': ema50_above_ema200
+            }
+        except Exception as e:
+            logger.error(f"Trend filter error: {e}")
+            return {'allow_long': True, 'ema50': 0.0, 'ema200': 0.0, 'trend': 'error'}
 
 
 class MACDAnalyzer:
@@ -687,11 +727,79 @@ class SignalOptimizer:
         return float(np.clip(base_threshold, 40, 70))
 
 
+class IndicatorWrapper:
+    """Wrapper class for indicator calculations with caching and error handling"""
+    
+    def __init__(self):
+        self._cache = {}
+        self._cache_ttl = 60  # Cache for 60 seconds
+    
+    def _get_cache_key(self, symbol: str, indicator: str, params: tuple) -> str:
+        """Generate cache key"""
+        return f"{symbol}_{indicator}_{params}"
+    
+    def _is_cache_valid(self, cache_key: str) -> bool:
+        """Check if cache entry is still valid"""
+        if cache_key not in self._cache:
+            return False
+        return time.time() - self._cache[cache_key]['time'] < self._cache_ttl
+    
+    def calculate_atr(self, ohlcv: List[List], period: int = 14, symbol: str = "default") -> float:
+        """Calculate ATR with caching"""
+        cache_key = self._get_cache_key(symbol, "atr", (period,))
+        
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key]['value']
+        
+        try:
+            atr = ATRAnalyzer.calculate(ohlcv, period)
+            self._cache[cache_key] = {'value': atr, 'time': time.time()}
+            return atr
+        except Exception as e:
+            logger.error(f"IndicatorWrapper ATR error: {e}")
+            return 0.0
+    
+    def calculate_rsi(self, ohlcv: List[List], period: int = 14, symbol: str = "default") -> float:
+        """Calculate RSI with caching"""
+        cache_key = self._get_cache_key(symbol, "rsi", (period,))
+        
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key]['value']
+        
+        try:
+            rsi = RSIAnalyzer.calculate(ohlcv, period)
+            self._cache[cache_key] = {'value': rsi, 'time': time.time()}
+            return rsi
+        except Exception as e:
+            logger.error(f"IndicatorWrapper RSI error: {e}")
+            return 50.0
+    
+    def calculate_ema(self, ohlcv: List[List], period: int = 9, symbol: str = "default") -> float:
+        """Calculate EMA with caching"""
+        cache_key = self._get_cache_key(symbol, "ema", (period,))
+        
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key]['value']
+        
+        try:
+            ema = EMAAnalyzer.calculate(ohlcv, period)
+            self._cache[cache_key] = {'value': ema, 'time': time.time()}
+            return ema
+        except Exception as e:
+            logger.error(f"IndicatorWrapper EMA error: {e}")
+            return 0.0
+    
+    def clear_cache(self):
+        """Clear all cached values"""
+        self._cache.clear()
+
+
 class IndicatorMatrix:
     """Main interface for all indicators"""
     
     def __init__(self, optimizer: Optional[SignalOptimizer] = None):
         self.optimizer = optimizer if optimizer is not None else SignalOptimizer()
+        self.wrapper = IndicatorWrapper()
     
     def complete_analysis(
         self,

@@ -15,18 +15,18 @@
     "atr_period": 14,
     "min_stop_pct": 1.0,
     "take_profit": 1.5,
-    "tank_mode": true,
+    "tank_mode": false,
     "min_confidence_threshold": 85.0,
     "min_rvol_threshold": 2.0,
     "btc_crash_15m_limit": -2.0,
-    "max_trades_per_day": 5,
-    "cooldown_after_loss_minutes": 30,
+    "max_trades_per_day": 2500,
+    "cooldown_after_loss_minutes": 0,
     "dry_run": true,
     "order_execution_timeout_sec": 60,
     "partial_tp_activation_pct": 1.0,
     "partial_tp_size_pct": 50.0,
     "move_to_breakeven": true,
-    "trailing_callback_pct": 0.5
+    "trailing_callback_pct": 1.1
   },
   "symbols": [
     "NOT/USDT",
@@ -34,7 +34,12 @@
     "BNB/USDT",
     "SOL/USDT",
     "XRP/USDT",
-    "ADA/USDT"
+    "ADA/USDT",
+    "PEPE/USDT",
+    "DOGE/USDT",
+    "SHIB/USDT",
+    "BONK/USDT",
+    "WIF/USDT"
   ],
   "exchange": {
     "name": "bybit"
@@ -96,5 +101,37 @@
     "btc_correlation_filter": false,
     "btc_correlation_period": 24,
     "btc_correlation_threshold": 0.5
+  },
+  "hydra_net": {
+    "enabled": true,
+    "dump_threshold": -0.75,
+    "min_rvol": 1.35,
+    "grid_update_interval_sec": 3.0,
+    "grid_distance_pct": 0.4,
+    "max_grid_levels": 3,
+    "take_profit_pct": 0.8,
+    "adaptive_spacing": true,
+    "failing_knife_threshold": -3.0,
+    "failing_knife_period_min": 15,
+    "min_order_size_usdt": 5.0,
+    "max_order_size_usdt": 20.0
+  },
+  "scanner_protection": {
+    "btc_crash_3m_pct": -1.5,
+    "btc_crash_15m_pct": -2.5,
+    "atr_spike_multiplier": 3.5,
+    "min_orderbook_liquidity_pct": 40.0,
+    "cooldown_freeze_minutes": 30
+  },
+  "metrics": {
+    "port": 9090
+  },
+  "arbitrage": {
+    "enabled": true,
+    "min_profit_pct": 0.05,
+    "fee_per_leg_pct": 0.10,
+    "scan_interval_ms": 50,
+    "symbols": ["BTCUSDT", "ETHUSDT", "ETHBTC"],
+    "metrics_port": 9091
   }
 }

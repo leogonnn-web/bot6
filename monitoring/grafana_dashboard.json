@@ -1,0 +1,150 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "hydra-triada-v1",
+    "title": "HYDRA Triada Bot",
+    "tags": ["trading", "hydra", "triada"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "time": { "from": "now-1h", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Balance USDT",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+        "targets": [{ "expr": "hydra_balance_usdt", "legendFormat": "Balance" }],
+        "fieldConfig": {
+          "defaults": { "unit": "currencyUSD", "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "orange", "value": 15 },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 100 }
+            ]
+          }}
+        }
+      },
+      {
+        "id": 2,
+        "title": "Capital Mode",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 6, "y": 0 },
+        "targets": [{ "expr": "hydra_capital_mode_info{mode!=\"\"}", "legendFormat": "{{mode}}" }]
+      },
+      {
+        "id": 3,
+        "title": "Grid Max Levels",
+        "type": "gauge",
+        "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+        "targets": [{ "expr": "hydra_grid_max_levels", "legendFormat": "Levels" }],
+        "fieldConfig": { "defaults": { "min": 0, "max": 3, "thresholds": {
+          "steps": [
+            { "color": "red", "value": 0 },
+            { "color": "yellow", "value": 1 },
+            { "color": "green", "value": 3 }
+          ]
+        }}}
+      },
+      {
+        "id": 4,
+        "title": "Session Profit",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 14, "y": 0 },
+        "targets": [{ "expr": "hydra_session_profit_usdt", "legendFormat": "Profit" }],
+        "fieldConfig": { "defaults": { "unit": "currencyUSD", "thresholds": {
+          "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 0 }
+          ]
+        }}}
+      },
+      {
+        "id": 5,
+        "title": "Bot State",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+        "targets": [{ "expr": "hydra_bot_state", "legendFormat": "State" }],
+        "fieldConfig": { "defaults": { "mappings": [
+          { "type": "value", "options": {
+            "0": { "text": "IDLE", "color": "blue" },
+            "1": { "text": "SCANNING", "color": "yellow" },
+            "2": { "text": "BUYING", "color": "orange" },
+            "3": { "text": "IN_POSITION", "color": "green" },
+            "4": { "text": "EXITING", "color": "red" }
+          }}
+        ]}}
+      },
+      {
+        "id": 10,
+        "title": "Orders Total (by side)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+        "targets": [
+          { "expr": "rate(hydra_orders_total[5m])", "legendFormat": "{{side}} ({{strategy}})" }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Order Latency (p50 / p95 / p99)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+        "targets": [
+          { "expr": "histogram_quantile(0.50, rate(hydra_order_latency_seconds_bucket[5m]))", "legendFormat": "p50" },
+          { "expr": "histogram_quantile(0.95, rate(hydra_order_latency_seconds_bucket[5m]))", "legendFormat": "p95" },
+          { "expr": "histogram_quantile(0.99, rate(hydra_order_latency_seconds_bucket[5m]))", "legendFormat": "p99" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      },
+      {
+        "id": 12,
+        "title": "Slippage Distribution",
+        "type": "histogram",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+        "targets": [
+          { "expr": "rate(hydra_slippage_pct_bucket[5m])", "legendFormat": "{{le}}%" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "percent" } }
+      },
+      {
+        "id": 13,
+        "title": "Order Errors",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+        "targets": [
+          { "expr": "rate(hydra_order_errors_total[5m])", "legendFormat": "{{side}} — {{error_type}}" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars" } } }
+      },
+      {
+        "id": 20,
+        "title": "Grid Level (per symbol)",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+        "targets": [
+          { "expr": "hydra_grid_current_level", "legendFormat": "{{symbol}}" }
+        ]
+      },
+      {
+        "id": 21,
+        "title": "Grid Avg Price (per symbol)",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+        "targets": [
+          { "expr": "hydra_grid_avg_price", "legendFormat": "{{symbol}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
+      },
+      {
+        "id": 30,
+        "title": "Balance History",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 24, "x": 0, "y": 26 },
+        "targets": [
+          { "expr": "hydra_balance_usdt", "legendFormat": "USDT Balance" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "currencyUSD", "custom": { "fillOpacity": 15 } } }
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "total_balance": 1000.0,
+  "available": 950.0,
+  "reserve": 50.0,
+  "grid_allowed": true,
+  "max_grid_levels": 3,
+  "arb_allowed": true,
+  "mode": "grid_3",
+  "slot_size": 18.0,
+  "timestamp": 1779389435.869346
+}

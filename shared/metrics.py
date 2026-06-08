@@ -7,16 +7,22 @@ Import and use from any module:
     METRICS.order_total.labels(side='buy', strategy='SimpleLimitStrategy').inc()
 
 HTTP server started once via `start_metrics_server(port)`.
+Also serves /maintenance endpoint for graceful emergency exit.
 """
 
 from __future__ import annotations
 
+import weakref
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from prometheus_client import (
     Counter,
     Gauge,
     Histogram,
     Info,
-    start_http_server,
+    REGISTRY,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
 )
 
 # ---------------------------------------------------------------------------
@@ -27,6 +33,14 @@ class _Metrics:
     """Container for all Prometheus metrics — instantiated once at import."""
 
     def __init__(self):
+        self.registry = REGISTRY
+        # Clear stale metrics on re-import / restart
+        for name in list(self.registry._names_to_collectors.keys()):
+            try:
+                self.registry.unregister(self.registry._names_to_collectors[name])
+            except KeyError:
+                pass
+
         # ── Orders ──
         self.order_total = Counter(
             'hydra_orders_total',
@@ -98,15 +112,97 @@ class _Metrics:
             'hydra_session_profit_usdt',
             'Cumulative session profit in USDT',
         )
+        self.health_status = Gauge(
+            'hydra_health_status',
+            'Health check status (1=healthy, 0=degraded)',
+        )
+        self.heartbeat_timestamp = Gauge(
+            'hydra_heartbeat_timestamp',
+            'Unix timestamp of last main loop iteration',
+        )
+
+        # ── Toxic-flow filter ──
+        self.toxic_blocks_total = Counter(
+            'hydra_toxic_blocks_total',
+            'Total entry attempts blocked by ToxicFlowFilter',
+            ['symbol', 'reason'],
+        )
+        self.toxic_active = Gauge(
+            'hydra_toxic_active',
+            'Whether the symbol is currently flagged as toxic (1=blocked)',
+            ['symbol'],
+        )
 
     def start_server(self, port: int = 9090) -> None:
-        """Start the Prometheus HTTP scrape endpoint (call once)."""
+        """Start the Prometheus HTTP scrape endpoint with /maintenance support."""
         try:
-            start_http_server(port)
+            server = HTTPServer(('', port), _make_handler(self.registry))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
         except OSError:
-            # Port already bound (e.g. bot restarted without killing old process)
             pass
+
+    def set_bot(self, bot) -> None:
+        """Register bot instance for maintenance endpoint callbacks."""
+        _BOT_REF['bot'] = weakref.ref(bot)
+
+
+# Global weak reference storage for the HTTP handler
+_BOT_REF: dict = {}
+
+
+def _make_handler(registry):
+    """Factory that returns a custom HTTPRequestHandler class."""
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # Suppress default HTTP logging noise
+
+        def do_GET(self):
+            if self.path == '/metrics':
+                self.send_response(200)
+                self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(generate_latest(registry))
+            elif self.path == '/maintenance':
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                bot_ref = _BOT_REF.get('bot')
+                bot = bot_ref() if bot_ref else None
+                if bot:
+                    status = {
+                        'maintenance_mode': getattr(bot, 'maintenance_mode', False),
+                        'state': getattr(getattr(bot, 'state', None), 'name', 'unknown'),
+                        'symbol': bot.state_data.get('symbol') if hasattr(bot, 'state_data') else None,
+                    }
+                else:
+                    status = {'maintenance_mode': False, 'error': 'bot not registered'}
+                self.wfile.write(json.dumps(status).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path == '/maintenance':
+                bot_ref = _BOT_REF.get('bot')
+                bot = bot_ref() if bot_ref else None
+                if bot and hasattr(bot, 'enter_maintenance_mode'):
+                    bot.enter_maintenance_mode()
+                    self.send_response(202)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'maintenance_started'}).encode())
+                else:
+                    self.send_response(503)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'bot_not_ready'}).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    return _Handler
 
 
 # Module-level singleton
 METRICS = _Metrics()
+import json  # noqa: E402

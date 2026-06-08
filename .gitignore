@@ -74,3 +74,18 @@ Thumbs.db
 .cache/
 *.tmp
 temp/
+
+# Deployment artifacts (large binaries — never commit)
+*.tar.gz
+*.zip
+triada.tar.gz
+triada.zip
+
+# Local logs / reports (kept out of repo)
+bot_local.log
+compare_logs_output.txt
+
+# Go build artifacts
+arb-engine/hydra-arb
+arb-engine/hydra-arb.exe
+*.exe

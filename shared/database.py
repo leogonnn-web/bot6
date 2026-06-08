@@ -27,6 +27,22 @@ class TradeDatabase:
                     confidence REAL
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dispatcher_features (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER REFERENCES trades(id),
+                    timestamp REAL,
+                    symbol TEXT,
+                    confidence REAL,
+                    rvol_spike REAL,
+                    rvol_local REAL,
+                    dump_depth REAL,
+                    obi_skew REAL,
+                    btc_1h REAL,
+                    score REAL,
+                    mode TEXT
+                )
+            ''')
             conn.commit()
             conn.close()
         except Exception as e:
@@ -45,6 +61,35 @@ class TradeDatabase:
             logger.info(f"Trade logged: {side} {symbol}")
         except Exception as e:
             logger.error(f"Error logging trade to database: {e}")
+
+    def log_dispatcher_features(
+        self,
+        trade_id: int,
+        symbol: str,
+        confidence: float,
+        rvol_spike: float,
+        rvol_local: float,
+        dump_depth: float,
+        obi_skew: float,
+        btc_1h: float,
+        score: float,
+        mode: str,
+    ):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                '''INSERT INTO dispatcher_features
+                   (trade_id, timestamp, symbol, confidence, rvol_spike,
+                    rvol_local, dump_depth, obi_skew, btc_1h, score, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (trade_id, time.time(), symbol, confidence, rvol_spike,
+                 rvol_local, dump_depth, obi_skew, btc_1h, score, mode),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error logging dispatcher features: {e}")
 
     def get_session_stats(self) -> dict:
         """Session PnL and trade counts from trades.db (FIFO buy/sell per symbol)."""

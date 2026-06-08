@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────
+# triada-watchdog — isolated self-healing supervisor
+# Runs separately from hydra-bot to survive total bot crashes.
+# ─────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps: only requests + docker SDK needed (no ccxt / numpy bloat)
+RUN pip install --no-cache-dir \
+        requests==2.31.0 \
+        docker==7.1.0
+
+COPY src/monitoring/__init__.py /app/src/monitoring/__init__.py
+COPY src/monitoring/watchdog.py /app/src/monitoring/watchdog.py
+
+# Make `python -m src.monitoring.watchdog` resolvable
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Sane default; can be overridden by environment in compose
+ENV PROMETHEUS_URL=http://prometheus:9090 \
+    TARGET_CONTAINER=hydra-bot \
+    POLL_INTERVAL_SEC=5 \
+    STALL_THRESHOLD_SEC=15 \
+    RESTART_COOLDOWN_SEC=60
+
+CMD ["python", "-m", "src.monitoring.watchdog"]

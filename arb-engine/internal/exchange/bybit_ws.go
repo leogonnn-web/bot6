@@ -26,38 +26,22 @@ const (
 	pingInterval  = 20 * time.Second
 )
 
-// BybitWS manages a single WebSocket connection and writes ticks into MarketSlots.
+// BybitWS manages a single WebSocket connection and writes ticks into MultiSource.
 type BybitWS struct {
-	slots    []engine.MarketSlot
-	index    engine.SlotIndex
-	mu       sync.RWMutex
-	conn     *websocket.Conn
-	symbols  []string
-	onTick   func(symbol string) // optional callback after slot write
+	source  *MultiSource
+	mu      sync.RWMutex
+	conn    *websocket.Conn
+	symbols []string
+	onTick  func(symbol string) // optional callback after slot write
 }
 
 // NewBybitWS creates a connector. Symbols like "BTCUSDT", "ETHUSDT", "ETHBTC".
-func NewBybitWS(symbols []string, onTick func(string)) *BybitWS {
-	idx := make(engine.SlotIndex, len(symbols))
-	for i, s := range symbols {
-		idx[s] = i
-	}
+func NewBybitWS(source *MultiSource, symbols []string, onTick func(string)) *BybitWS {
 	return &BybitWS{
-		slots:   make([]engine.MarketSlot, len(symbols)),
-		index:   idx,
+		source:  source,
 		symbols: symbols,
 		onTick:  onTick,
 	}
-}
-
-// GetSlot returns pointer to slot for direct Read() access (zero-copy path).
-func (b *BybitWS) GetSlot(symbol string) *engine.MarketSlot {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if i, ok := b.index[symbol]; ok {
-		return &b.slots[i]
-	}
-	return nil
 }
 
 // Run connects and reads forever, reconnecting on error.
@@ -81,10 +65,11 @@ func (b *BybitWS) connectAndRead(ctx context.Context) error {
 	defer conn.Close()
 	b.conn = conn
 
-	// Subscribe to tickers
+	// Register slots and subscribe to tickers
 	args := make([]string, len(b.symbols))
 	for i, s := range b.symbols {
 		args[i] = "tickers." + s
+		b.source.RegisterSlot("bybit:" + s)
 	}
 	sub := map[string]interface{}{
 		"op":   "subscribe",
@@ -149,10 +134,6 @@ func (b *BybitWS) handleMessage(raw []byte) {
 	}
 
 	sym := msg.Data.Symbol
-	i, ok := b.index[sym]
-	if !ok {
-		return
-	}
 
 	bid, _ := strconv.ParseFloat(msg.Data.Bid1Price, 64)
 	ask, _ := strconv.ParseFloat(msg.Data.Ask1Price, 64)
@@ -163,8 +144,8 @@ func (b *BybitWS) handleMessage(raw []byte) {
 		return
 	}
 
-	// Write into cache-line-isolated MarketSlot (spec-compliant path)
-	b.slots[i].Write(engine.Tick{
+	// Write into MultiSource
+	b.source.WriteTick("bybit:"+sym, engine.Tick{
 		Bid:    bid,
 		Ask:    ask,
 		BidQty: bidQty,

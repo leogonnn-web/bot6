@@ -1,0 +1,2 @@
+2026/05/25 02:50:00 [MAIN] panic monitor active threshold=-2.00%
+2026/05/25 02:50:01 [MAIN] triada-go-scalp started

@@ -1,0 +1,10 @@
+import sqlite3, time
+c = sqlite3.connect('/var/lib/docker/volumes/triada_shared-data/_data/trades.db')
+cur = c.cursor()
+now = time.time()
+# buys since deploy (~17:16)
+cutoff = time.mktime((2026, 6, 5, 17, 16, 0, 0, 0, -1))
+print('buys since deploy:', cur.execute('SELECT COUNT(*) FROM trades WHERE side=? AND timestamp>?', ('buy',cutoff)).fetchone()[0])
+print('last 5 buys:', cur.execute('SELECT symbol,side,timestamp FROM trades WHERE side=? ORDER BY timestamp DESC LIMIT 5', ('buy',)).fetchall())
+print('last 5 sells:', cur.execute('SELECT symbol,side,ROUND(profit,4) FROM trades WHERE side LIKE ? ORDER BY timestamp DESC LIMIT 5', ('sell%',)).fetchall())
+c.close()

@@ -542,7 +542,7 @@ class SignalOptimizer:
         }
         self.signal_weights = {**default_weights, **(signal_weights or {})}
         self.min_confidence_threshold = float(min_confidence_threshold)
-        self.strong_buy_threshold = float(strong_buy_threshold) if strong_buy_threshold else max(75.0, self.min_confidence_threshold + 15.0)
+        self.strong_buy_threshold = float(strong_buy_threshold) if strong_buy_threshold else max(35.0, self.min_confidence_threshold + 15.0)
         self.use_conflict_detection = use_conflict_detection
         self.volatility_adjusted = volatility_adjusted
         self.tank_mode = tank_mode
@@ -609,16 +609,16 @@ class SignalOptimizer:
                 score += 1.0
                 signals_fired.append("EMA weak uptrend")
             elif ema_alignment <= -1:
-                score -= 1.5
-                conflicts.append("EMA downtrend")
+                score -= 0.5
+                # conflicts.append("EMA downtrend")  # Hydra scalp: knife-catch ignores EMA downtrend
             
             # MACD
             if macd_signal.get('bullish'):
                 score += self.signal_weights['macd']
                 signals_fired.append("MACD bullish")
             elif macd_signal.get('bearish'):
-                score -= 1.5
-                conflicts.append("MACD bearish")
+                score -= 0.5
+                # conflicts.append("MACD bearish")  # Hydra scalp: minor bearish OK
             
             # Stochastic
             if stochastic_signal:
@@ -663,13 +663,13 @@ class SignalOptimizer:
                         'tank_block_reason': f'Conflict detected: {conflicts[0]}'
                     }
             else:
-                # Normal mode
-                if self.use_conflict_detection and len(conflicts) >= 2:
-                    score *= 0.7
+                # Normal mode (Hydra scalp: allow more conflicts)
+                if self.use_conflict_detection and len(conflicts) >= 3:
+                    score *= 0.85
             
-            # Volatility adjustment
-            if self.volatility_adjusted and volatility_level > 1.3:
-                score *= 0.85
+            # Volatility adjustment (Hydra: shitcoins are always volatile)
+            if self.volatility_adjusted and volatility_level > 3.0:
+                score *= 0.90
             
             confidence = (score / self.max_possible_score) * 100
             confidence = max(0, min(100, confidence))
@@ -713,18 +713,19 @@ class SignalOptimizer:
         base_threshold = float(self.min_confidence_threshold)
         
         # Only adjust for BTC trend if detection is enabled
+        # Hydra scalp: less aggressive BTC/vol adjustments
         if btc_trend_detection_enabled:
             if btc_trend == "bullish":
-                base_threshold -= 5
+                base_threshold -= 3
             elif btc_trend == "bearish":
-                base_threshold += 10
+                base_threshold += 2
         
-        if market_volatility > 1.5:
-            base_threshold += 5
+        if market_volatility > 3.0:
+            base_threshold += 2
         elif market_volatility < 0.7:
-            base_threshold -= 3
+            base_threshold -= 2
         
-        return float(np.clip(base_threshold, 40, 70))
+        return float(np.clip(base_threshold, 10, 40))
 
 
 class IndicatorWrapper:
@@ -801,6 +802,35 @@ class IndicatorMatrix:
         self.optimizer = optimizer if optimizer is not None else SignalOptimizer()
         self.wrapper = IndicatorWrapper()
     
+    def _normalize_ohlcv(self, ohlcv_data):
+        """Normalize ohlcv to list-of-lists format from various ccxt formats"""
+        if not ohlcv_data:
+            return []
+        # If already list of lists with 6 elements, return as-is
+        if isinstance(ohlcv_data, list) and len(ohlcv_data) > 0:
+            first = ohlcv_data[0]
+            if isinstance(first, list) and len(first) >= 6:
+                return ohlcv_data
+            # Dict format: list of dicts
+            if isinstance(first, dict):
+                normalized = []
+                for c in ohlcv_data:
+                    if 'close' in c:
+                        row = [
+                            c.get('timestamp', 0),
+                            c.get('open', 0),
+                            c.get('high', 0),
+                            c.get('low', 0),
+                            c.get('close', 0),
+                            c.get('volume', 0)
+                        ]
+                    else:
+                        # Fallback: assume numeric keys 0-5
+                        row = [c.get(i, 0) for i in range(6)]
+                    normalized.append(row)
+                return normalized
+        return []
+
     def complete_analysis(
         self,
         ohlcv_data: List[List],
@@ -816,6 +846,7 @@ class IndicatorMatrix:
             Dict with comprehensive analysis and recommendation
         """
         try:
+            ohlcv_data = self._normalize_ohlcv(ohlcv_data)
             if len(ohlcv_data) < 52:
                 return {
                     'status': 'insufficient_data',
@@ -824,17 +855,60 @@ class IndicatorMatrix:
                     'message': f'Need 52+ candles, have {len(ohlcv_data)}'
                 }
             
-            # Calculate all indicators
-            rsi = RSIAnalyzer.calculate(ohlcv_data)
-            ema_9 = EMAAnalyzer.calculate(ohlcv_data, 9)
-            ema_21 = EMAAnalyzer.calculate(ohlcv_data, 21)
-            macd, macd_signal, macd_hist = MACDAnalyzer.calculate(ohlcv_data)
-            k, d = StochasticAnalyzer.calculate(ohlcv_data)
-            atr = ATRAnalyzer.calculate(ohlcv_data)
+            # Calculate all indicators with individual error handling
+            try:
+                rsi = float(RSIAnalyzer.calculate(ohlcv_data))
+            except Exception as e:
+                logger.warning(f"RSI error: {e}")
+                rsi = 50.0
+            
+            try:
+                ema_9 = float(EMAAnalyzer.calculate(ohlcv_data, 9))
+            except Exception as e:
+                logger.warning(f"EMA9 error: {e}")
+                ema_9 = current_price
+            
+            try:
+                ema_21 = float(EMAAnalyzer.calculate(ohlcv_data, 21))
+            except Exception as e:
+                logger.warning(f"EMA21 error: {e}")
+                ema_21 = current_price
+            
+            try:
+                macd, macd_signal_line, macd_hist = MACDAnalyzer.calculate(ohlcv_data)
+                macd = float(macd)
+                macd_signal_line = float(macd_signal_line)
+                macd_hist = float(macd_hist)
+            except Exception as e:
+                logger.warning(f"MACD error: {e}")
+                macd = macd_signal_line = macd_hist = 0.0
+            
+            try:
+                k, d = StochasticAnalyzer.calculate(ohlcv_data)
+                k = float(k)
+                d = float(d)
+            except Exception as e:
+                logger.warning(f"Stochastic error: {e}")
+                k = d = 50.0
+            
+            try:
+                atr = float(ATRAnalyzer.calculate(ohlcv_data))
+            except Exception as e:
+                logger.warning(f"ATR error: {e}")
+                atr = 0.0
             
             # Advanced indicators
-            ichimoku_signal = IchimokuAnalyzer.get_signals(ohlcv_data, current_price)
-            volume_signal = VolumeProfileAnalyzer.get_signals(ohlcv_data, current_price)
+            try:
+                ichimoku_signal = IchimokuAnalyzer.get_signals(ohlcv_data, current_price)
+            except Exception as e:
+                logger.warning(f"Ichimoku error: {e}")
+                ichimoku_signal = {'recommendation': 'WAIT', 'components': {}}
+            
+            try:
+                volume_signal = VolumeProfileAnalyzer.get_signals(ohlcv_data, current_price)
+            except Exception as e:
+                logger.warning(f"Volume signal error: {e}")
+                volume_signal = {'at_poc': False, 'volume_strength': 0}
             
             # Prepare signal data
             rsi_signal = {
@@ -849,8 +923,8 @@ class IndicatorMatrix:
             }
             
             macd_signal = {
-                'bullish': macd > macd_signal and macd_hist > 0,
-                'bearish': macd < macd_signal and macd_hist < 0
+                'bullish': macd > macd_signal_line and macd_hist > 0,
+                'bearish': macd < macd_signal_line and macd_hist < 0
             }
             
             stochastic_signal = {
@@ -895,7 +969,7 @@ class IndicatorMatrix:
                     'ema_9': float(ema_9),
                     'ema_21': float(ema_21),
                     'macd': float(macd),
-                    'macd_signal': float(macd_signal),
+                    'macd_signal': float(macd_signal_line),
                     'macd_histogram': float(macd_hist),
                     'stochastic_k': float(k),
                     'stochastic_d': float(d),

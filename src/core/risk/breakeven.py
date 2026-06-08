@@ -56,6 +56,9 @@ class BreakevenMixin:
             self.state_data['order_id'] = new_order_id
             self.state_data['is_breakeven'] = True
             logger.info(f"@BREAKEVEN_SET@ Breakeven set for {symbol} at {breakeven_price}")
+            # Persist state so is_breakeven survives restarts
+            if hasattr(self, '_save_state'):
+                self._save_state()
         except Exception as e:
             logger.error(f"Breakeven error: {e}")
 

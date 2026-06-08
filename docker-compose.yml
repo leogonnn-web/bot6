@@ -24,8 +24,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "5"
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/metrics')"]
       interval: 30s
@@ -98,6 +98,34 @@ services:
       - "3000:3000"   # Grafana UI
     networks:
       - triada
+
+  # ── Watchdog: external silent self-healing supervisor ──
+  watchdog:
+    build:
+      context: .
+      dockerfile: monitoring/Dockerfile.watchdog
+    container_name: triada-watchdog
+    restart: unless-stopped
+    # NO depends_on hydra-bot — watchdog must outlive bot crashes
+    depends_on:
+      - prometheus
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - TARGET_CONTAINER=hydra-bot
+      - POLL_INTERVAL_SEC=5
+      - STALL_THRESHOLD_SEC=15
+      - RESTART_COOLDOWN_SEC=60
+      - LOG_LEVEL=INFO
+    volumes:
+      # Mount docker socket so watchdog can issue `restart` against the engine
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - triada
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   shared-data:        # capital_state.json exchange between bot ↔ arb

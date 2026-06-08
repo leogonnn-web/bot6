@@ -1,0 +1,13 @@
+import sqlite3
+conn=sqlite3.connect('/app/shared/state/trades.db')
+c=conn.cursor()
+c.execute("SELECT COUNT(*), SUM(profit) FROM trades WHERE side LIKE 'sell%'")
+row=c.fetchone()
+print('Total sells:', row[0], 'Profit sum:', round(row[1] or 0, 2))
+c.execute("SELECT COUNT(*), SUM(profit) FROM trades WHERE side LIKE 'sell%' AND profit < 0")
+row=c.fetchone()
+print('Loss sells:', row[0], 'Loss sum:', round(row[1] or 0, 2))
+c.execute("SELECT COUNT(*), SUM(profit) FROM trades WHERE side LIKE 'sell%' AND profit >= 0")
+row=c.fetchone()
+print('Win sells:', row[0], 'Win sum:', round(row[1] or 0, 2))
+conn.close()

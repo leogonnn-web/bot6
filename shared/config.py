@@ -174,6 +174,14 @@ class Config:
     def get_retry_config(self) -> dict:
         """Get retry configuration"""
         return self.config['api_retry']
+
+    def get_websocket_config(self) -> dict:
+        """Get WebSocket configuration"""
+        return self.config.get('websocket', {
+            'enabled': True,
+            'reconnect_interval_sec': 5,
+            'max_reconnect_attempts': 10
+        })
     
     def get_cache_config(self) -> dict:
         """Get cache configuration"""

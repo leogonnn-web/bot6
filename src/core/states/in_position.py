@@ -5,7 +5,8 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
 from logger_setup import logger
-from utils import safe_float
+from utils import safe_float, chase_deadline, exit_backstop_decision
+from metrics import METRICS
 
 from ..state_enum import BotState
 
@@ -13,19 +14,31 @@ from ..state_enum import BotState
 class InPositionStateMixin:
     def _handle_in_position_state(self):
         try:
+            symbol = self.state_data.get('symbol', 'unknown')
+            logger.info(f"@IN_POSITION_LOOP@ Monitoring {symbol}, grid_active={self.state_data.get('is_grid_active', False)}")
             # HYDRA-NET: Skip normal monitoring if grid is active
             if self.state_data.get('is_grid_active', False):
                 return  # Grid synchronization happens in main loop
 
-            symbol = self.state_data['symbol']
             trading_config = self.config.get_trading_config()
             is_dry_run = trading_config.get('dry_run', False)
             ws_data = self.ws_tickers_cache.get(symbol, {})
             current_price = ws_data.get('last') or safe_float(self.exchange.fetch_ticker(symbol)['last'])
 
+            # Maintenance mode: emergency close position
+            if getattr(self, 'maintenance_mode', False):
+                self._handle_maintenance_exit(symbol, current_price, is_dry_run)
+                return
+
             change_percent = ((current_price - self.state_data['buy_price']) / self.state_data['buy_price']) * 100
             elapsed = time.time() - self.state_data['buy_time']
-            take_profit_pct = trading_config.get('take_profit', 1.5)
+            target_sell_price = self.state_data.get('target_sell_price')
+            if target_sell_price:
+                # Grid mode: use exact TP price set by hydra_net
+                is_tp_hit = current_price >= target_sell_price
+            else:
+                take_profit_pct = trading_config.get('take_profit', 1.5)
+                is_tp_hit = change_percent >= take_profit_pct
 
             # Partial TP settings
             position_value_usdt = self.state_data['amount'] * self.state_data['buy_price']
@@ -36,7 +49,6 @@ class InPositionStateMixin:
             trailing_callback = trading_config.get('trailing_callback_pct', 0.5)
 
             print(f"Position {symbol}: {change_percent:.2f}% | Time: {int(elapsed)}s @MONITOR_WS@", end='\r')
-            is_tp_hit = change_percent >= take_profit_pct
             is_sl_hit = change_percent <= -trading_config['panic_stop']
             is_partial_tp_hit = partial_tp_enabled and change_percent >= partial_tp_activation
 
@@ -49,12 +61,16 @@ class InPositionStateMixin:
             # Update trailing high
             if current_price > self.state_data['trailing_high']:
                 self.state_data['trailing_high'] = current_price
+                if hasattr(self, '_save_state'):
+                    self._save_state()
 
             # Check partial TP
             if is_partial_tp_hit and not self.state_data['partial_tp_hit']:
                 logger.info(f"@PARTIAL_TP@ Partial TP hit for {symbol} (+{change_percent:.2f}%)")
                 self._execute_partial_tp(symbol, current_price, partial_tp_size, is_dry_run)
                 self.state_data['partial_tp_hit'] = True
+                if hasattr(self, '_save_state'):
+                    self._save_state()
 
                 # Move to breakeven if enabled
                 if move_to_breakeven and not self.state_data.get('is_breakeven', False):
@@ -71,17 +87,18 @@ class InPositionStateMixin:
             if is_dry_run:
                 if is_tp_hit:
                     logger.info(f"@DRY_RUN_TP@ Virtual TP hit for {symbol} (+{change_percent:.2f}%)")
-                    trade_profit = (self.state_data['target_sell_price'] - self.state_data['buy_price']) * self.state_data['amount']
+                    trade_profit = self._calc_pnl(self.state_data['buy_price'], self.state_data['target_sell_price'], self.state_data['amount'])
                     self.session_profit += trade_profit
-                    self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], self.state_data['target_sell_price'], confidence=0.0)
+                    METRICS.session_profit.set(self.session_profit)
+                    self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], self.state_data['target_sell_price'], confidence=0.0, profit=trade_profit)
+                    self._apply_dispatcher_feedback(trade_profit)
                     self.state_data = {}
                     self.state = BotState.IDLE
                     return
                 elif is_sl_hit:
                     logger.warning(f"@DRY_RUN_SL@ Virtual SL hit for {symbol} ({change_percent:.2f}%)")
                     self.last_loss_time = time.time()
-                    self.state_data = {}
-                    self.state = BotState.IDLE
+                    self._panic_sell(urgent=True, reason='sl')
                     return
             else:
                 # Check balance before order operations
@@ -126,9 +143,11 @@ class InPositionStateMixin:
 
                 if order['status'] == 'closed':
                     close_price = safe_float(order.get('price') or order.get('average', self.state_data['buy_price']))
-                    trade_profit = (close_price - self.state_data['buy_price']) * self.state_data['amount']
+                    trade_profit = self._calc_pnl(self.state_data['buy_price'], close_price, self.state_data['amount'])
                     self.session_profit += trade_profit
-                    self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], close_price, confidence=0.0)
+                    METRICS.session_profit.set(self.session_profit)
+                    self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], close_price, confidence=0.0, profit=trade_profit)
+                    self._apply_dispatcher_feedback(trade_profit)
                     logger.info(f"@PROFIT_TAKEN@ PROFIT! {symbol} +${trade_profit:.2f}")
                     self.state_data = {}
                     self.state = BotState.IDLE
@@ -136,20 +155,35 @@ class InPositionStateMixin:
                 if is_sl_hit:
                     logger.warning(f"@STOP_LOSS_HIT@ SL hit for {symbol} ({change_percent:.2f}%)")
                     self.last_loss_time = time.time()
-                    self._panic_sell()
+                    self._panic_sell(urgent=True, reason='sl')
                     return
             adaptive_timeout = self._calculate_adaptive_breakeven_timeout(symbol)
-            if elapsed > adaptive_timeout and not self.state_data['is_breakeven']:
+            if elapsed > adaptive_timeout and not self.state_data.get('is_breakeven', False):
                 logger.info(f"@BREAKEVEN_TIMEOUT@ Adaptive timeout reached: {elapsed}s (ATR-based: {adaptive_timeout}s)")
                 self._set_breakeven()
+
+            # Hard exit: max position hold time (30 min default)
+            hard_exit_sec = trading_config.get('hard_exit_timeout_sec', 1800)
+            if elapsed > hard_exit_sec:
+                logger.warning(f"@HARD_EXIT_TIMEOUT@ Position held for {elapsed:.0f}s >= {hard_exit_sec}s, forcing exit")
+                self._panic_sell(urgent=False, reason='hard_exit')
+                return
         except Exception as e:
             logger.error(f"@IN_POSITION_ERROR@ IN_POSITION state error for {self.state_data.get('symbol', 'unknown')}: {e}", exc_info=True)
 
-    def _panic_sell(self) -> None:
+    def _panic_sell(self, urgent: bool = True, reason: str = 'panic') -> None:
+        """Exit the position. Tries an aggressive limit-chase (maker, no slippage)
+        first when enabled, falling back to a market backstop on timeout or a
+        hard adverse move. `urgent=True` shrinks the chase window for stop-loss /
+        trailing exits; `urgent=False` (e.g. stale-position hard-exit) allows a
+        longer passive chase.
+        """
         try:
             symbol = self.state_data['symbol']
             trading_config = self.config.get_trading_config()
             is_dry_run = trading_config.get('dry_run', False)
+            chaser = trading_config.get('limit_chaser', {})
+            buy_price = self.state_data['buy_price']
 
             # Cancel existing sell order if any
             try:
@@ -158,25 +192,71 @@ class InPositionStateMixin:
             except Exception as e:
                 logger.debug(f"@PANIC_CANCEL_WARN@ Failed to cancel sell order: {e}")
 
-            time.sleep(0.5)
             amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
 
+            # Live market snapshot
+            ws = self.ws_tickers_cache.get(symbol, {})
+            best_bid = safe_float(ws.get('bid'))
+            best_ask = safe_float(ws.get('ask'))
+            cur_price = best_bid or best_ask or buy_price
+
+            # Hard-adverse safeguard: urgent + already far below entry -> straight to market
+            backstop_now, bs_reason = exit_backstop_decision(
+                buy_price, cur_price, urgent,
+                chaser.get('urgent_skip_below_pct', 1.5), deadline_passed=False
+            )
+            use_chase = chaser.get('enabled', True) and best_ask > 0 and not backstop_now
+
+            if use_chase:
+                if is_dry_run:
+                    exit_order_id = 'virtual_chase'
+                else:
+                    time.sleep(0.3)
+                    limit_order = self.order_manager.sell(symbol, amount, best_ask)
+                    exit_order_id = limit_order.get('id')
+                deadline = chase_deadline(
+                    time.time(), urgent,
+                    chaser.get('chase_sec_urgent', 3.0),
+                    chaser.get('chase_sec_normal', 12.0)
+                )
+                self.state_data.update({
+                    'exit_order_id': exit_order_id,
+                    'exit_time': time.time(),
+                    'exit_amount': amount,
+                    'exit_type': 'chase',
+                    'exit_mode': 'chase',
+                    'exit_urgent': urgent,
+                    'exit_reason': reason,
+                    'chase_deadline': deadline,
+                    'chase_limit_price': best_ask,
+                })
+                self.state = BotState.EXITING
+                logger.info(
+                    f"@CHASE_START@ {symbol} limit-chase @ {best_ask} urgent={urgent} "
+                    f"window={deadline - time.time():.0f}s reason={reason}"
+                )
+                return
+
+            # Immediate market exit (chaser disabled, no book, or hard-adverse)
+            time.sleep(0.5)
             if is_dry_run:
                 logger.info(f"@DRY_RUN_PANIC@ Virtual market sell: {amount} {symbol}")
-                order_id = "virtual_panic_sell_12345"
+                exit_order_id = "virtual_panic_sell_12345"
             else:
                 logger.info(f"@PANIC_SELL_SEND@ Market sell order: {amount} {symbol}")
                 market_order = self.order_manager.market_sell(symbol, amount)
-                order_id = market_order.get('id')
+                exit_order_id = market_order.get('id')
 
-            # Update state_data for EXITING state
-            self.state_data['exit_order_id'] = order_id
-            self.state_data['exit_time'] = time.time()
-            self.state_data['exit_amount'] = amount
-            self.state_data['exit_type'] = 'panic'
-
+            self.state_data.update({
+                'exit_order_id': exit_order_id,
+                'exit_time': time.time(),
+                'exit_amount': amount,
+                'exit_type': 'panic',
+                'exit_mode': 'market',
+                'exit_reason': reason,
+            })
             self.state = BotState.EXITING
-            logger.info(f"@STATE_CHANGED@ State -> EXITING for {symbol}, order_id: {order_id}")
+            logger.info(f"@PANIC_MARKET@ {symbol} market exit reason={reason} bs={bs_reason} -> EXITING")
         except Exception as e:
             logger.error(f"Panic sell error: {e}")
             self.state_data = {}
@@ -192,9 +272,10 @@ class InPositionStateMixin:
             if is_dry_run:
                 logger.info(f"@DRY_RUN_PARTIAL_TP@ Virtual partial TP: {symbol} sell {partial_amount} @ ${current_price}")
                 self.state_data['amount'] = remaining_amount
-                trade_profit = (current_price - self.state_data['buy_price']) * partial_amount
+                trade_profit = self._calc_pnl(self.state_data['buy_price'], current_price, partial_amount)
                 self.session_profit += trade_profit
-                self.trade_db.log_trade(symbol, "sell_partial", partial_amount, current_price, confidence=0.0)
+                METRICS.session_profit.set(self.session_profit)
+                self.trade_db.log_trade(symbol, "sell_partial", partial_amount, current_price, confidence=0.0, profit=trade_profit)
                 return
 
             # Cancel existing sell order
@@ -212,9 +293,10 @@ class InPositionStateMixin:
             self.state_data['amount'] = remaining_amount
 
             # Log partial TP profit
-            trade_profit = (current_price - self.state_data['buy_price']) * partial_amount
+            trade_profit = self._calc_pnl(self.state_data['buy_price'], current_price, partial_amount)
             self.session_profit += trade_profit
-            self.trade_db.log_trade(symbol, "sell_partial", partial_amount, current_price, confidence=0.0)
+            METRICS.session_profit.set(self.session_profit)
+            self.trade_db.log_trade(symbol, "sell_partial", partial_amount, current_price, confidence=0.0, profit=trade_profit)
             logger.info(f"@PARTIAL_TP_DONE@ Partial TP complete. Profit: ${trade_profit:.2f}, Remaining: {remaining_amount}")
 
             # Re-create sell order for remaining position at breakeven or original TP
@@ -229,5 +311,86 @@ class InPositionStateMixin:
                 self.state_data['order_id'] = new_order['id']
                 logger.info(f"@PARTIAL_REORDER@ TP order for remaining: {new_order['id']}")
 
+            if hasattr(self, '_save_state'):
+                self._save_state()
+
         except Exception as e:
             logger.error(f"Partial TP error: {e}")
+
+    def _handle_maintenance_exit(self, symbol: str, current_price: float, is_dry_run: bool):
+        """Emergency close position during maintenance mode."""
+        try:
+            buy_price = self.state_data['buy_price']
+            amount = self.state_data['amount']
+            elapsed_since_maintenance = time.time() - self._maintenance_start_time
+
+            # Phase 1: Try limit sell at breakeven (buy_price)
+            if elapsed_since_maintenance < self._maintenance_limit_timeout:
+                if not self.state_data.get('_maintenance_limit_placed', False):
+                    self.state_data['_maintenance_limit_placed'] = True
+                    if is_dry_run:
+                        # In dry-run, if price >= buy_price, simulate fill
+                        if current_price >= buy_price:
+                            logger.info(f"@MAINTENANCE_CLOSE@ Dry-run limit sell filled @ {current_price} (breakeven)")
+                            trade_profit = self._calc_pnl(buy_price, current_price, amount)
+                            self.session_profit += trade_profit
+                            METRICS.session_profit.set(self.session_profit)
+                            self.trade_db.log_trade(symbol, "sell", amount, current_price, confidence=0.0, profit=trade_profit)
+                            self.state_data = {}
+                            self.state = BotState.IDLE
+                            return
+                        else:
+                            logger.info(f"@MAINTENANCE_WAIT@ Dry-run waiting for price >= {buy_price} (current: {current_price})")
+                            return
+                    else:
+                        # Real mode: place limit sell at breakeven
+                        try:
+                            sell_order = self.order_manager.sell(symbol, amount, buy_price)
+                            self.state_data['maintenance_order_id'] = sell_order['id']
+                            logger.info(f"@MAINTENANCE_ORDER@ Limit sell placed @ {buy_price}: {sell_order['id']}")
+                            return
+                        except Exception as e:
+                            logger.error(f"@MAINTENANCE_ORDER_ERROR@ Failed to place limit sell: {e}")
+                else:
+                    # Limit already placed, check if filled (real mode)
+                    if not is_dry_run and self.state_data.get('maintenance_order_id'):
+                        try:
+                            order = self.exchange.fetch_order(self.state_data['maintenance_order_id'], symbol)
+                            if order['status'] in ['closed', 'filled']:
+                                close_price = safe_float(order.get('price') or order.get('average', buy_price))
+                                trade_profit = self._calc_pnl(buy_price, close_price, amount)
+                                self.session_profit += trade_profit
+                                METRICS.session_profit.set(self.session_profit)
+                                self.trade_db.log_trade(symbol, "sell", amount, close_price, confidence=0.0, profit=trade_profit)
+                                logger.info(f"@MAINTENANCE_CLOSE@ Limit sell filled @ {close_price}")
+                                self.state_data = {}
+                                self.state = BotState.IDLE
+                                return
+                        except Exception as e:
+                            logger.debug(f"@MAINTENANCE_CHECK_WARN@ {e}")
+                    return
+
+            # Phase 2: Timeout exceeded — market sell
+            logger.warning(f"@MAINTENANCE_TIMEOUT@ Limit sell timeout ({self._maintenance_limit_timeout}s). Market selling {symbol}")
+            if is_dry_run:
+                trade_profit = self._calc_pnl(buy_price, current_price, amount, is_market_exit=True)
+                self.session_profit += trade_profit
+                METRICS.session_profit.set(self.session_profit)
+                self._record_panic_exit(trade_profit)
+                self.trade_db.log_trade(symbol, "sell_panic", amount, current_price, confidence=0.0, profit=trade_profit)
+                logger.info(f"@MAINTENANCE_MARKET@ Dry-run market sell @ {current_price}, PnL: ${trade_profit:.2f}")
+                self.state_data = {}
+                self.state = BotState.IDLE
+            else:
+                # Cancel limit order if exists
+                if self.state_data.get('maintenance_order_id'):
+                    try:
+                        self.exchange.cancel_order(self.state_data['maintenance_order_id'], symbol)
+                    except Exception:
+                        pass
+                self._panic_sell()
+        except Exception as e:
+            logger.error(f"@MAINTENANCE_ERROR@ Maintenance exit failed: {e}")
+            # Last resort: reset state
+            self.state_data = {}
+            self.state = BotState.IDLE

@@ -5,7 +5,8 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
 from logger_setup import logger
-from utils import safe_float
+from utils import safe_float, exit_backstop_decision
+from metrics import METRICS
 
 from ..state_enum import BotState
 
@@ -21,6 +22,11 @@ class ExitingStateMixin:
             trading_config = self.config.get_trading_config()
             is_dry_run = trading_config.get('dry_run', False)
             timeout_sec = trading_config.get('order_execution_timeout_sec', 60)
+
+            # Limit-chaser: manage an in-flight passive exit (re-peg / backstop)
+            if self.state_data.get('exit_mode') == 'chase':
+                self._handle_chase_exit(symbol, is_dry_run)
+                return
 
             elapsed = time.time() - exit_time
             print(f"EXITING {symbol}: {elapsed:.1f}s / {timeout_sec}s @EXITING_MONITOR@", end='\r')
@@ -88,19 +94,102 @@ class ExitingStateMixin:
                     close_price = ws_data.get('bid') or safe_float(self.exchange.fetch_ticker(symbol)['bid'])
                     close_price = close_price if close_price > 0 else (buy_price * 0.98)
 
-            trade_profit = (close_price - buy_price) * amount
+            trade_profit = self._calc_pnl(buy_price, close_price, amount, is_market_exit=(exit_type == 'panic'))
             self.session_profit += trade_profit
 
+            # Update metrics
+            METRICS.order_total.labels(side='sell', strategy='hydra_net').inc()
+            METRICS.active_positions.set(0)
+            METRICS.session_profit.set(self.session_profit)
+
             if exit_type == 'panic':
-                self.trade_db.log_trade(symbol, "sell_panic", amount, close_price, confidence=0.0)
+                self._record_panic_exit(trade_profit)
+                self.trade_db.log_trade(symbol, "sell_panic", amount, close_price, confidence=0.0, profit=trade_profit)
                 logger.warning(f"@PANIC_SELL_DONE@ Panic sell complete. Price: {close_price}, PnL: ${trade_profit:.2f}")
             else:
-                self.trade_db.log_trade(symbol, "sell", amount, close_price, confidence=0.0)
+                self.trade_db.log_trade(symbol, "sell", amount, close_price, confidence=0.0, profit=trade_profit)
                 logger.info(f"@EXIT_DONE@ Exit complete. Price: {close_price}, PnL: ${trade_profit:.2f}")
-
+            self._apply_dispatcher_feedback(trade_profit)
             self.state_data = {}
             self.state = BotState.IDLE
         except Exception as e:
             logger.error(f"On exit filled error: {e}")
             self.state_data = {}
             self.state = BotState.IDLE
+
+    def _handle_chase_exit(self, symbol: str, is_dry_run: bool):
+        """Manage an in-flight limit-chase exit: fill, re-peg, or market backstop."""
+        sd = self.state_data
+        buy_price = sd['buy_price']
+        amount = sd['exit_amount']
+        urgent = sd.get('exit_urgent', True)
+        chaser = self.config.get_trading_config().get('limit_chaser', {})
+        ws = self.ws_tickers_cache.get(symbol, {})
+        best_bid = safe_float(ws.get('bid'))
+        best_ask = safe_float(ws.get('ask'))
+        now = time.time()
+        deadline_passed = now >= sd.get('chase_deadline', now)
+        cur_price = best_bid or best_ask or buy_price
+        limit_price = sd.get('chase_limit_price') or best_ask or buy_price
+
+        backstop, reason = exit_backstop_decision(
+            buy_price, cur_price, urgent,
+            chaser.get('urgent_skip_below_pct', 1.5), deadline_passed
+        )
+
+        if is_dry_run:
+            # Maker fill modeled when the market trades up to our resting ask:
+            # either the bid reaches our price, or the ask ticks above it (lifted).
+            if (best_bid > 0 and best_bid >= limit_price) or (best_ask > 0 and best_ask > limit_price):
+                logger.info(f"@CHASE_FILL@ {symbol} maker fill @ {limit_price}")
+                self._on_exit_filled(symbol, amount, buy_price, 'chase', close_price=limit_price, is_dry_run=True)
+                return
+            if backstop:
+                logger.warning(f"@CHASE_BACKSTOP@ {symbol} -> market ({reason}) @ {cur_price}")
+                self._on_exit_filled(symbol, amount, buy_price, 'panic', close_price=cur_price, is_dry_run=True)
+                return
+            # Re-peg downward to follow a falling ask (still maker)
+            if chaser.get('repeg', True) and best_ask > 0 and best_ask < limit_price:
+                sd['chase_limit_price'] = best_ask
+                logger.debug(f"@CHASE_REPEG@ {symbol} -> {best_ask}")
+            return
+
+        # Real mode: poll the resting limit order
+        order_id = sd.get('exit_order_id')
+        try:
+            order = self.exchange.fetch_order(order_id, symbol)
+            status = order.get('status')
+            if status in ('closed', 'filled'):
+                close_price = safe_float(order.get('average') or order.get('price') or limit_price)
+                logger.info(f"@CHASE_FILL@ {symbol} limit filled @ {close_price}")
+                self._on_exit_filled(symbol, amount, buy_price, 'chase', close_price=close_price, is_dry_run=False)
+                return
+        except Exception as e:
+            logger.debug(f"@CHASE_POLL_WARN@ {e}")
+
+        if backstop:
+            try:
+                self.exchange.cancel_order(order_id, symbol)
+            except Exception:
+                pass
+            try:
+                market_order = self.order_manager.market_sell(symbol, amount)
+                sd['exit_order_id'] = market_order.get('id')
+            except Exception as e:
+                logger.error(f"@CHASE_BACKSTOP_ERR@ {e}")
+            sd['exit_type'] = 'panic'
+            sd['exit_mode'] = 'market'
+            sd['exit_time'] = time.time()
+            logger.warning(f"@CHASE_BACKSTOP@ {symbol} -> market ({reason}); next tick resolves fill")
+            return
+
+        # Re-peg: if the ask dropped below our resting price, cancel & re-post lower
+        if chaser.get('repeg', True) and best_ask > 0 and best_ask < limit_price:
+            try:
+                amended = self.order_manager.amend(order_id, symbol, amount, best_ask)
+                if amended and amended.get('id'):
+                    sd['exit_order_id'] = amended.get('id')
+                sd['chase_limit_price'] = best_ask
+                logger.debug(f"@CHASE_REPEG@ {symbol} -> {best_ask}")
+            except Exception as e:
+                logger.debug(f"@CHASE_REPEG_WARN@ {e}")

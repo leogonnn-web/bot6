@@ -7,13 +7,82 @@ from typing import Dict
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
 from logger_setup import logger
 from utils import safe_float
+from metrics import METRICS
 
 from ..state_enum import BotState
 
 
 class BuyingStateMixin:
-    def _enter_trade(self, symbol: str, price: float, tickers: Dict) -> None:
+    def _on_buy_filled(self, symbol: str, amount: float, buy_price: float, is_dry_run: bool = False):
+        """Handle buy order fill and transition to IN_POSITION"""
         try:
+            logger.info(f"@BUY_FILLED@ Buy filled: {symbol}, amount: {amount}, price: {buy_price}")
+            
+            # Log the trade and get real trade_id
+            trade_id = self.trade_db.log_trade(symbol, "buy", amount, buy_price, confidence=0.0)
+            
+            # If we have dispatcher features from scan time, log them with real trade_id
+            df = self.state_data.get('dispatcher_features', {})
+            logger.info(f"@DISPATCHER_DEBUG@ df_empty={not df} df_keys={list(df.keys()) if df else []} trade_id={trade_id}")
+            if df and trade_id > 0:
+                try:
+                    self.trade_db.log_dispatcher_features(
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        confidence=df.get('confidence', 0.0),
+                        rvol_spike=df.get('rvol_spike', 0.0),
+                        rvol_local=df.get('rvol_local', 0.0),
+                        dump_depth=df.get('dump_depth', 0.0),
+                        obi_skew=df.get('obi_skew', 0.0),
+                        btc_1h=df.get('btc_1h', 0.0),
+                        score=df.get('score', 0.0),
+                        mode=df.get('mode', 'normal'),
+                    )
+                    logger.info(f"@DISPATCHER_LINK@ Features linked to trade_id={trade_id}")
+                except Exception as df_err:
+                    logger.error(f"@DISPATCHER_LINK_WARN@ {df_err}")
+            
+            # Update metrics
+            METRICS.order_total.labels(side='buy', strategy='hydra_net').inc()
+            METRICS.active_positions.set(1)
+            
+            # Calculate target sell price based on take profit config
+            trading_config = self.config.get_trading_config()
+            # If grid already set target_sell_price, preserve it (hydra_net TP)
+            existing_tp = self.state_data.get('target_sell_price')
+            if existing_tp:
+                target_sell_price = existing_tp
+            else:
+                take_profit_pct = trading_config.get('take_profit', 1.5)
+                target_sell_price = buy_price * (1 + take_profit_pct / 100)
+
+            # Transition to IN_POSITION state, preserve grid state_data keys
+            new_state = {
+                'symbol': symbol,
+                'buy_price': buy_price,
+                'amount': amount,
+                'buy_time': time.time(),
+                'is_dry_run': is_dry_run,
+                'target_sell_price': target_sell_price,
+                'is_breakeven': False,
+                'partial_tp_hit': False,
+                'trailing_high': buy_price
+            }
+            # Preserve grid-specific keys if they exist
+            for key in ['entry_price', 'current_level', 'total_cost', 'total_qty', 'order_id', 'is_grid_active', 'dispatcher_features']:
+                if key in self.state_data:
+                    new_state[key] = self.state_data[key]
+            self.state_data = new_state
+            self.state = BotState.IN_POSITION
+            logger.info(f"@STATE_CHANGED@ State -> IN_POSITION for {symbol}")
+        except Exception as e:
+            logger.error(f"@ON_BUY_FILL_ERROR@ Error handling buy fill: {e}", exc_info=True)
+            self.state_data = {}
+            self.state = BotState.IDLE
+
+    def _enter_trade(self, symbol: str, price: float, tickers: Dict, dispatcher_features: Dict = None) -> None:
+        try:
+            logger.info(f"@ENTER_TRADE_DEBUG@ {symbol} df_empty={not dispatcher_features} keys={list(dispatcher_features.keys()) if dispatcher_features else []}")
             trading_config = self.config.get_trading_config()
             buy_price = safe_float(tickers[symbol]['ask'])
             slot_size = trading_config['slot_size']
@@ -34,7 +103,8 @@ class BuyingStateMixin:
                 'buy_time': time.time(),
                 'order_id': order_id,
                 'amount_target': amount_target,
-                'is_dry_run': is_dry_run
+                'is_dry_run': is_dry_run,
+                'dispatcher_features': dispatcher_features or {},
             }
 
             self.state = BotState.BUYING

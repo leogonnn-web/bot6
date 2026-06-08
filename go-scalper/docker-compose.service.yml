@@ -1,0 +1,30 @@
+# Append this block to the existing docker-compose.yml in the host project root.
+# It deploys the isolated Go scalper as its own container on port :9095.
+
+  triada-go-scalp:
+    build:
+      context: ./go-scalper
+      dockerfile: Dockerfile
+    container_name: triada-go-scalp
+    restart: unless-stopped
+    environment:
+      - BYBIT_API_KEY=${BYBIT_API_KEY}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET}
+    volumes:
+      - ./go-scalper/config.json:/config.json:ro
+      - ./go-scalper/hot_symbols.json:/hot_symbols.json:ro
+    ports:
+      - "9095:9095"
+    networks:
+      - triada-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9095/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

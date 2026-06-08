@@ -2,11 +2,12 @@
 import time
 import sys
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
 from logger_setup import logger
 from utils import safe_float
+from metrics import METRICS
 
 from ..state_enum import BotState
 from indicators.matrix import ATRAnalyzer
@@ -189,6 +190,10 @@ class HydraNetMixin:
             actual_qty = self.state_data['total_qty']
 
             logger.info(f"@GRID_RECALC@ Колено {current_level} учтено. Новая средняя цена: {avg_price:.6f}, Всего монет: {actual_qty}")
+            
+            # Update metrics
+            METRICS.grid_level.labels(symbol=symbol).set(current_level)
+            METRICS.grid_avg_price.labels(symbol=symbol).set(avg_price)
 
             # Проверяем, есть ли следующее колено усреднения
             if current_level < max_levels:
@@ -346,9 +351,8 @@ class HydraNetMixin:
                 self.state = BotState.IDLE
                 return
 
-            # Calculate take-profit price
-            trading_config = self.config.get_trading_config()
-            take_profit_pct = trading_config.get('take_profit', 1.5)
+            # Calculate take-profit price using hydra_net config (not generic trading config)
+            take_profit_pct = self.hydra_net_config.get('take_profit_pct', 0.8)
             sell_raw = buy_price * (1 + (take_profit_pct / 100))
             sell_p = float(self.exchange.exchange.price_to_precision(symbol, sell_raw))
 
@@ -375,8 +379,25 @@ class HydraNetMixin:
             self.state_data['partial_tp_hit'] = False
             self.state_data['trailing_high'] = buy_price
 
-            # Log trade
-            self.trade_db.log_trade(symbol, "buy", safe_amount, buy_price, confidence=100.0)
+            # Log trade and link dispatcher features
+            trade_id = self.trade_db.log_trade(symbol, "buy", safe_amount, buy_price, confidence=100.0)
+            df = self.state_data.get('dispatcher_features')
+            if df and trade_id > 0:
+                try:
+                    self.trade_db.log_dispatcher_features(
+                        trade_id=trade_id, symbol=symbol,
+                        confidence=df.get('confidence', 0.0),
+                        rvol_spike=df.get('rvol_spike', 0.0),
+                        rvol_local=df.get('rvol_local', 0.0),
+                        dump_depth=df.get('dump_depth', 0.0),
+                        obi_skew=df.get('obi_skew', 0.0),
+                        btc_1h=df.get('btc_1h', 0.0),
+                        score=df.get('score', 0.0),
+                        mode=df.get('mode', 'normal'),
+                    )
+                    logger.info(f"@DISPATCHER_LINK@ Grid buy linked trade_id={trade_id}")
+                except Exception as link_err:
+                    logger.debug(f"@DISPATCHER_LINK_WARN@ {link_err}")
             logger.info(f"@GRID_EXECUTED@ Position filled at bottom: {symbol} | TP set @ ${sell_p}")
 
         except Exception as e:
@@ -385,22 +406,24 @@ class HydraNetMixin:
             self.state_data = {}
             self.state = BotState.IDLE
 
-    def _launch_grid_network(self, symbol: str, price: float, tickers: Dict) -> None:
+    def _launch_grid_network(self, symbol: str, price: float, tickers: Dict, mode_override: Optional[str] = None, dispatcher_features: Optional[Dict] = None) -> None:
         """
         HYDRA-NET: Launch dynamic grid network
-        Creates initial buy order that will be synchronized with price
+        Creates initial buy order that will be synchronized with price.
+        Optional mode_override from HydraDispatcher overrides default grid params.
+        Optional dispatcher_features dict stores scan-time features for later DB linkage.
         """
         try:
             # Check if grid mode is enabled
             if not self.hydra_net_config.get('enabled', False):
                 logger.info("@GRID_DISABLED@ HYDRA-NET disabled, using normal entry")
-                self._enter_trade(symbol, price, tickers)
+                self._enter_trade(symbol, price, tickers, dispatcher_features=dispatcher_features)
                 return
 
             # Capital Router guard: check if grid is allowed
             if hasattr(self, 'capital_router') and not self.capital_router.state.grid_allowed:
                 logger.info(f"@GRID_BLOCKED@ Capital Router: grid disabled (mode={self.capital_router.state.mode}), single-shot entry")
-                self._enter_trade(symbol, price, tickers)
+                self._enter_trade(symbol, price, tickers, dispatcher_features=dispatcher_features)
                 return
 
             buy_price = safe_float(tickers[symbol]['ask'])
@@ -445,7 +468,20 @@ class HydraNetMixin:
                 'is_dry_run': is_dry_run,
                 'entry_price': buy_price,
                 'current_level': 1,
+                'dispatcher_features': dispatcher_features or {},
             }
+            # Dispatcher mode override (Phase 1: observation only)
+            if mode_override and getattr(self, 'dispatcher_enabled', False):
+                self.state_data['dispatcher_mode'] = mode_override
+                try:
+                    dp = self.dispatcher.get_grid_params(mode_override)
+                    self.state_data['grid_distance'] = dp.grid_distance_pct
+                    self.state_data['take_profit_pct'] = dp.take_profit_pct
+                    self.state_data['slot_multiplier'] = dp.slot_multiplier
+                    self.state_data['max_grids'] = dp.max_grid_levels
+                    logger.info(f"@DISPATCHER_GRID@ {symbol} using {mode_override} params: distance={dp.grid_distance_pct}% tp={dp.take_profit_pct}%")
+                except Exception as dp_err:
+                    logger.warning(f"@DISPATCHER_GRID_WARN@ Failed to apply {mode_override}: {dp_err}")
             logger.info(f"@GRID_INIT_FIX@ entry_price принудительно зафиксирован при создании ордера: {buy_price:.6f}")
 
             self.last_grid_update = time.time()

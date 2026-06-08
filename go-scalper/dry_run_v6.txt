@@ -1,0 +1,18 @@
+2026/05/25 03:40:12 [MAIN] panic monitor active threshold=-2.00%
+2026/05/25 03:40:12 [MAIN] triada-go-scalp started
+2026/05/25 03:40:12 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:17 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:22 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:27 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:32 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:37 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:42 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:40:42 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:47 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:53 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:40:58 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:03 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:08 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:12 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:41:13 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:18 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)

@@ -1,9 +1,10 @@
 // HYDRA-FAST Arbitrage Engine — Triada Component #3
 //
 // Architecture:
-//   [BybitWS] → [MarketSlots (SeqLock)] → [TriangularScanner] → [SPSC Ring] → [Executor]
-//                                                                                  ↑
-//   [CapitalBridge] ← reads capital_state.json from Python bot ──────────────────────┘
+//
+//	[BybitWS] → [MarketSlots (SeqLock)] → [TriangularScanner] → [SPSC Ring] → [Executor]
+//	                                                                               ↑
+//	[CapitalBridge] ← reads capital_state.json from Python bot ──────────────────────┘
 //
 // The engine sleeps (no WS connection) until CapitalBridge reports arb_allowed=true.
 package main
@@ -64,28 +65,47 @@ func main() {
 	log.Println("[HYDRA-ARB] waiting for capital bridge: arb_allowed=true ...")
 	waitForArb(cb, done)
 
-	// Symbols for triangular arbitrage
-	symbols := []string{"BTCUSDT", "ETHUSDT", "ETHBTC"}
+	// Symbols for triangular arbitrage (USDT anchors + cross pairs)
+	symbols := []string{
+		"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
+		"ETHBTC", "SOLBTC", "XRPBTC",
+	}
+
+	// Unified multi-exchange market data source
+	source := exchange.NewMultiSource()
 
 	// Signal ring buffer (SPSC from spec)
 	ring := ringbuf.New(256)
 
-	// WebSocket connector → writes into MarketSlots
-	ws := exchange.NewBybitWS(symbols, nil)
+	// WebSocket connectors → write into MultiSource
+	wsBybit := exchange.NewBybitWS(source, symbols, nil)
+	wsMexc := exchange.NewMexcWS(source, symbols)
+	wsBitget := exchange.NewBitgetWS(source, symbols)
+
 	go func() {
-		if err := ws.Run(ctxFromDone(done)); err != nil {
-			log.Printf("[WS] stopped: %v", err)
+		if err := wsBybit.Run(ctxFromDone(done)); err != nil {
+			log.Printf("[BYBIT-WS] stopped: %v", err)
+		}
+	}()
+	go func() {
+		if err := wsMexc.Run(ctxFromDone(done)); err != nil {
+			log.Printf("[MEXC-WS] stopped: %v", err)
+		}
+	}()
+	go func() {
+		if err := wsBitget.Run(ctxFromDone(done)); err != nil {
+			log.Printf("[BITGET-WS] stopped: %v", err)
 		}
 	}()
 
 	// Wait for first ticks
 	log.Println("[HYDRA-ARB] waiting for market data...")
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	// Triangular scanner
 	cfg := strategy.DefaultConfig()
 	triangles := strategy.DefaultTriangles()
-	scanner := strategy.NewScanner(ws, ring, triangles, cfg)
+	scanner := strategy.NewScanner(source, ring, triangles, cfg)
 
 	// Executor goroutine (reads from ring)
 	go executor(ring, done)
@@ -149,9 +169,9 @@ func ctxFromDone(done <-chan struct{}) interface {
 
 type doneCtx struct{ done <-chan struct{} }
 
-func (d *doneCtx) Done() <-chan struct{}        { return d.done }
-func (d *doneCtx) Deadline() (time.Time, bool)  { return time.Time{}, false }
-func (d *doneCtx) Value(any) any                { return nil }
+func (d *doneCtx) Done() <-chan struct{}       { return d.done }
+func (d *doneCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (d *doneCtx) Value(any) any               { return nil }
 func (d *doneCtx) Err() error {
 	select {
 	case <-d.done:

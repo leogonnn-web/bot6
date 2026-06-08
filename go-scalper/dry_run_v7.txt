@@ -1,0 +1,45 @@
+2026/05/25 03:41:23 [MAIN] panic monitor active threshold=-2.00%
+2026/05/25 03:41:23 [MAIN] triada-go-scalp started
+2026/05/25 03:41:23 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:28 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:33 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:38 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:43 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:48 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:53 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:41:53 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:41:58 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:04 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:09 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:14 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:19 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:23 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:42:24 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:29 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:34 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:39 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:44 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:49 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:53 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:42:54 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:42:59 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:04 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:09 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:14 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:20 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:23 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:43:25 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:30 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:35 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:40 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:45 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:50 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:43:53 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:43:55 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:00 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:05 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:10 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:15 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:20 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)
+2026/05/25 03:44:23 [STATUS] slots=0/6 trades=0/2500 halted=false
+2026/05/25 03:44:25 [DEBUG] best=BTCUSDT vel=0.0000 rvol=1.00 obi=0.00 rsi=50.0 score=0.0000 (need vel>=0.0012 rvol>=1.40 obi>=0.25)

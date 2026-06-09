@@ -154,36 +154,59 @@ else:              mode = 'conservative'    # чаще всего
 -- Таблица dispatcher_features (в trades.db на AWS)
 CREATE TABLE dispatcher_features (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_id INTEGER,
-    symbol TEXT,
-    mode TEXT,
-    score REAL,
-    drop_pct REAL,
-    rvol_spike REAL,
-    obi_skew REAL,
-    dump_depth REAL,
-    btc_1h REAL,
+    trade_id INTEGER,        -- 0 = лог валидации до исполнения; >0 = исполненная позиция
     timestamp REAL,
-    profit REAL   -- заполняется при закрытии сделки
+    symbol TEXT,
+    confidence REAL,
+    rvol_spike REAL,
+    rvol_local REAL,
+    dump_depth REAL,
+    obi_skew REAL,
+    btc_1h REAL,
+    score REAL,
+    mode TEXT,
+    profit REAL,             -- заполняется при закрытии сделки (NULL = ещё открыта)
+    take_profit_pct REAL
 );
+-- trades: id, symbol, side, amount, price, timestamp, confidence, profit
+-- side: buy, buy_grid_complete, sell, sell_partial, sell_panic
 ```
 
-**Как проверить через неделю:**
+**Снятие полной статистики эффективности — `tools/server_stats.py`**
+
+Скрипт сам считает срез «с момента последнего обнуления» (граница = самая ранняя
+строка `dispatcher_features`). Выдаёт: объём данных, разбивку по режимам, win-rate,
+realized PnL по типам выхода, частоту сделок/час, распределение по часам, средние фичи,
+топ символов.
+
 ```bash
-ssh -i triada-key2.pem ubuntu@54.179.1.197 "sudo python3 /tmp/tmp_dstats.py"
+# с Windows (PowerShell), ключ на рабочем столе:
+scp -i C:\Users\leogo\Desktop\triada-key2.pem tools\server_stats.py ubuntu@54.179.1.197:/tmp/server_stats.py
+ssh -i C:\Users\leogo\Desktop\triada-key2.pem ubuntu@54.179.1.197 "sudo docker cp /tmp/server_stats.py hydra-bot:/tmp/server_stats.py && sudo docker exec hydra-bot python /tmp/server_stats.py"
 ```
 
-**Что смотреть:**
-| Что | Где | Пример запроса |
-|-----|-----|----------------|
-| Сколько сэмплов | `SELECT COUNT(*) FROM dispatcher_features` | (сброшено в 0 — 2026-06-08) |
-| conservative | `WHERE mode='conservative'` | — |
-| С прибылью | `WHERE profit IS NOT NULL` | — |
-| Win-rate | `SELECT COUNT(*) WHERE profit>0` / total | — |
+> 💡 Если SSH не подключается, а инстанс `Running` — проверь **Security Group → Inbound
+> порт 22**: твой внешний IP (динамический) мог смениться. Обнови правило на «My IP».
+> Пинг не показатель — AWS блокирует ICMP по умолчанию.
 
-> 🔄 **2026-06-08:** `dispatcher_features` обнулён (было 2133 → 0) для чистого
-> сбора под новой политикой P.2+P.6. Старый снимок сохранён в бэкапе БД
-> (см. раздел 13). Используй только данные **после 2026-06-08 16:03 UTC**.
+> 🔄 **2026-06-08 16:03 UTC:** `dispatcher_features` обнулён (было 2133 → 0) для чистого
+> сбора под P.2+P.6. Старый снимок — в бэкапе БД (раздел 13). Данные считать
+> **только после 2026-06-08 16:03 UTC**.
+
+**Срез на 2026-06-09 10:35 UTC (≈18.5 ч сбора):**
+| Метрика | Значение |
+|---------|----------|
+| Размечено сэмплов (profit ≠ null) | **143** (из 456 строк; 144 исполненных позиции) |
+| По режимам | conservative 76.1% · normal 23.9% · red_light **0** |
+| Win-rate | **91.9%** (по закрытиям) / 90.2% (labeled) |
+| Realized PnL (dry-run) | **+$15.80** (~+2.05%/день, верхняя граница) |
+| Частота | **~7.8 позиций/час ≈ 187/день** (цикл ~7.7 мин) |
+| Avg score | 1.71 (cons 1.60 / normal 2.08) |
+| Паник-выходы | 13 / 172 (7.6%), −$3.35 |
+
+**Выводы:** порог калибровки (≥50) уже пройден; до 500 conservative ~3–4 дня.
+`red_light` пока не срабатывал (флэт BTC) → веса для него (П.1) не обучить.
+Dry-run завышает PnL (нет слиппеджа) — выборка коротка, нужен месяц разных условий.
 
 ---
 
@@ -336,6 +359,7 @@ sudo sqlite3 /var/lib/docker/volumes/triada_shared-data/_data/trades.db
 - `roadmap.md` — roadmap Hydra (спот). Фьючерс вынесен в отдельный проект `triada-futures`
 - `docs/dispatcher_backlog.md` — 6 идей (П.1–П.6), статус
 - `tools/calibrate_dispatcher.py` — offline batch calibration (Widrow-Hoff)
+- `tools/server_stats.py` — снятие статистики эффективности с боевой БД (раздел 4.5)
 - `src/core/dispatcher.py` — scoring, weights, dynamic threshold
 - `src/core/states/scanning.py` — scanning + rejected_cache
 - `src/database/models.py` — DB schema + migration

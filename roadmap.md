@@ -1,8 +1,11 @@
-# ROADMAP: Hydra → Triada Futures
+# ROADMAP: Hydra (спот)
+
+> Фьючерсный roadmap вынесен в отдельный проект `triada-futures` (`docs/roadmap.md`)
+> при разделении проектов 2026-06-09.
 
 ## Контекст
 - Капитал: 50$ → цель 1000$ на Hydra (спот DCA)
-- Параллельно: строим фьючерсный directional бот на Bybit Testnet
+- Фьючерсный directional бот — **отдельный проект** `triada-futures` (см. его `docs/roadmap.md`)
 - Выбор пути: математика (статистика, ML, оптимизация)
 
 ---
@@ -17,83 +20,6 @@
   - Причина: win-rate 91.6% важнее частоты. Агрессивность = риск убытков.
 - [ ] Убедиться, что dispatcher feedback loop пишет данные стабильно
 - [ ] Запустить Hydra в автономный режим (мониторинг только по алертам)
-
----
-
-## Фаза 1: Изучение + Testnet-скелет (недели 1–2)
-
-**Цель:** Понять механику фьючерсов, написать минимальный работающий бот.
-
-**Задачи:**
-- Открыть Bybit Testnet аккаунт
-- Изучить: маржа, ликвидация, funding rate, isolated/cross, maker/taker
-- Скопировать `bybit_client.py` → `bybit_futures_client.py`
-- Минимальный цикл: connect → fetch ticker → place limit long → TP/SL → close
-- Результат: 1 ордер в день на testnet
-
-**Что учить:**
-- Position sizing (Kelly criterion, fixed fractional)
-- Как считать PnL с учетом плеча и комиссий
-
----
-
-## Фаза 2: Простая стратегия + Risk Management (недели 3–4)
-
-**Стратегия:** Breakout + Volume (15м свеча)
-- Пробой верхней границы 20-периодного диапазона
-- Объем > 1.5x среднего
-- TP +2.5%, SL -1.0%
-- Позиция = 5% депозита (риск 0.05% на сделку)
-
-**Risk Management:**
-- Макс 3 позиции одновременно
-- Daily loss limit (-2% → стоп на 24ч)
-- Portfolio heat (все long → пауза)
-
-**Результат:** Бот торгует автономно на testnet.
-
----
-
-## Фаза 3: Мультипозиционность + Корреляции (недели 5–8)
-
-**Архитектура:**
-- State machine: `Dict[str, Position]` вместо `IDLE/IN_POSITION`
-- Макс 5 позиций
-- Корреляционный фильтр: если BTC и ETH оба сигналят → берем только сильнейший
-
-**Математика:**
-- Rolling correlation (pandas)
-- Portfolio variance optimization
-- Equity curve analysis (drawdown, Sharpe)
-
-**Результат:** Институциональный уровень управления портфелем.
-
----
-
-## Фаза 4: ML-Edge (недели 9–12)
-
-**Что делать:**
-- Экспорт 200+ сделок из testnet → CSV
-- Обучить XGBoost / Random Forest
-- Фичи: rvol, obi_skew, dump_depth, btc_1h, funding_rate
-- Бот предсказывает expected profit перед входом
-- Вход только при expected profit > 0.8%
-
-**Результат:** Бот перестает быть rule-based.
-
----
-
-## Фаза 5: Реальные деньги (месяц 4+)
-
-**Условия старта:**
-- Hydra накопила 1000$+
-- Фьючерсный бот: стабильный месяц на testnet
-- Win-rate > 55%, Sharpe > 1.0, max drawdown < 10%
-
-**Запуск:**
-- 500$ → фьючерсы (плечо x2–x3)
-- 500$ → Hydra (спот, без риска)
-- Ежедневный мониторинг первые 2 недели
 
 ---
 
@@ -126,23 +52,12 @@
 
 ---
 
-## Список того, что нужно выучить (для меня)
-
-1. Position sizing: Kelly, fixed fractional, optimal f
-2. Корреляция портфеля: pandas, rolling correlation
-3. Backtesting: на testnet-данных и исторических свечах
-4. Drawdown management: equity curves, Sharpe, Calmar
-5. XGBoost / sklearn: обучение на табличных данных
-6. Portfolio optimization: mean-variance, Black-Litterman
-
----
-
 ## Заметки
 
 - Дата создания: 2026-06-05
 - Выбор пути: математика (не копирование готовых стратегий)
 - Текущий депозит Hydra: 50$ (dry run 1000$)
-- Цель Hydra: 1000$ (этап запуска фьючерсного бота)
+- Цель Hydra: 1000$ (после достижения — этап запуска отдельного фьючерс-проекта)
 - **При переходе на реальные деньги:** добавить авто-реинвест (compound).
   - Логика: каждые +X$ прибыли → увеличивать `slot_size` пропорционально.
   - Сейчас `slot_size` фиксирован, `session_profit` — просто счётчик.

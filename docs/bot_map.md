@@ -333,7 +333,7 @@ sudo sqlite3 /var/lib/docker/volumes/triada_shared-data/_data/trades.db
 
 ## 12. Ссылки
 
-- `docs/roadmap.md` — фазы проекта (Hydra → Futures)
+- `roadmap.md` — roadmap Hydra (спот). Фьючерс вынесен в отдельный проект `triada-futures`
 - `docs/dispatcher_backlog.md` — 6 идей (П.1–П.6), статус
 - `tools/calibrate_dispatcher.py` — offline batch calibration (Widrow-Hoff)
 - `src/core/dispatcher.py` — scoring, weights, dynamic threshold

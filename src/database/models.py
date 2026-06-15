@@ -175,16 +175,21 @@ class TradeDatabase:
         except Exception as e:
             logger.error(f"@DISPATCHER_LOG_WARN@ {e}")
 
-    def get_session_stats(self) -> Dict:
+    def get_session_stats(self, since_ts: float = 0) -> Dict:
         """
         Calculate session PnL and statistics from trades.db
-        Uses FIFO matching for buy/sell pairs per symbol
+        Uses FIFO matching for buy/sell pairs per symbol.
+
+        since_ts > 0 restricts the calculation to trades on/after that epoch,
+        used to scope the real-money session so prior dry-run PnL is excluded.
         """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'SELECT symbol, side, amount, price FROM trades ORDER BY timestamp ASC'
+                'SELECT symbol, side, amount, price FROM trades '
+                'WHERE timestamp >= ? ORDER BY timestamp ASC',
+                (since_ts,)
             )
             rows = cursor.fetchall()
             conn.close()

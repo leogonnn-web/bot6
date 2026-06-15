@@ -28,6 +28,7 @@
     "max_trades_per_day": 2000,
     "cooldown_after_loss_minutes": 10,
     "dry_run": true,
+    "session_start_ts": 0,
     "order_execution_timeout_sec": 60,
     "fee_pct": 0.1,
     "panic_slippage_pct": 0.1,

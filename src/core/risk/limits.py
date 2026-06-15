@@ -40,12 +40,23 @@ class RiskLimitsMixin:
                 logger.info(f"@RISK_LIMIT@ Daily limit reached: {daily_trades}/{max_day_trades}")
                 return False
             # ── Capital protection: max loss limit ──
+            is_dry_run = trading_config.get('dry_run', False)
             try:
                 stop_loss_pct = trading_config.get('stop_loss_total', 12.0)
-                stats = self.trade_db.get_session_stats()
+                # Scope realized PnL to the real-session baseline so that prior
+                # dry-run profit cannot mask real losses. In real mode the
+                # baseline MUST be set, otherwise the loss limit is meaningless.
+                since_ts = float(trading_config.get('session_start_ts', 0) or 0)
+                if not is_dry_run and since_ts <= 0:
+                    logger.critical(
+                        "@RISK_FAIL_CLOSED@ Real mode requires trading.session_start_ts "
+                        "(go-live epoch) to scope the loss limit. BLOCKING all new entries."
+                    )
+                    return False
+                stats = self.trade_db.get_session_stats(since_ts)
                 realized_pnl = float(stats.get('session_profit', 0.0))
                 # Get balance (dry_run uses virtual $1000)
-                if trading_config.get('dry_run', False):
+                if is_dry_run:
                     balance_usdt = 1000.0
                 else:
                     bal = self.exchange.fetch_balance()
@@ -64,6 +75,13 @@ class RiskLimitsMixin:
                 )
             except Exception as pnl_err:
                 logger.error(f"@RISK_PNL_ERROR@ Capital protection check failed: {pnl_err}")
+                # Fail-closed on real money: if capital cannot be verified, do NOT trade.
+                if not is_dry_run:
+                    logger.critical(
+                        "@RISK_FAIL_CLOSED@ Cannot verify capital protection in real mode "
+                        "-> BLOCKING all new entries."
+                    )
+                    return False
 
             # ── Circuit-breaker: halt entries after a cluster of panic exits ──
             if self._circuit_breaker_blocks():
@@ -82,4 +100,14 @@ class RiskLimitsMixin:
             raise
         except Exception as e:
             logger.error(f"@RISK_ERROR@ Risk limits check error: {e}")
+            # Fail-closed on real money; preserve dry-run resilience for data collection.
+            try:
+                is_dry = self.config.get_trading_config().get('dry_run', False)
+            except Exception:
+                is_dry = False  # cannot determine -> treat as real -> block
+            if not is_dry:
+                logger.critical(
+                    "@RISK_FAIL_CLOSED@ Risk-check error in real mode -> BLOCKING new entries."
+                )
+                return False
             return True

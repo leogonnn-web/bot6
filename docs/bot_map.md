@@ -377,6 +377,16 @@ sudo sqlite3 /var/lib/docker/volumes/triada_shared-data/_data/trades.db
 
 ## 13. Журнал развёртывания
 
+### 2026-06-15 — деплой риск-фиксов (всё ещё dry-run)
+- **Залито на сервер** (`~/triada/`, бэкапы `.bak-*` рядом): `src/core/risk/limits.py`,
+  `src/database/models.py`. Образ `triada-hydra-bot` пересобран, `hydra-bot` пересоздан.
+- **Фиксы:** fail-closed в реал-режиме; `get_session_stats(since_ts)` + `session_start_ts`
+  (PnL скоупится от go-live, иначе старая dry-run прибыль маскирует убытки). Коммиты d63501c, f247382.
+- **Проверка:** healthy, ошибок нет; `@RISK_PNL@ $500 / max -$120` `@RISK_OK@` — в dry-run
+  путь без изменений (`since_ts=0` = вся история). БД (named volume) сохранена.
+- **НЕ сделано (для реала):** config slot 3→5, исключить H/USDT, реальные ключи,
+  `session_start_ts`, `dry_run:false`. См. пре-флайт чеклист в `dispatcher_backlog.md`.
+
 ### 2026-06-08 — синхронизация local → server + сброс данных
 - **Что было:** образ сервера собран 2026-06-05 без P.2/P.6; локальный код опережал.
   Из 41 файла кода реально отличались 4 (+1 косметический).

@@ -251,21 +251,26 @@ class TradeDatabase:
                 "win_rate": 0.0,
             }
 
-    def get_daily_trades_count(self) -> int:
+    def get_daily_trades_count(self, since_ts: float = 0) -> int:
         """
-        Count trades made today (UTC date)
-        Used for daily trade limit enforcement
+        Count trades made today (UTC date).
+
+        If since_ts > 0, count only trades on/after max(today_start, since_ts).
+        Pass the real-session start (go-live epoch) so prior dry-run trades are
+        excluded from the live daily limit.
+        Used for daily trade limit enforcement.
         """
         try:
             from datetime import datetime, timezone
             today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             today_start_ts = int(today_start.timestamp())
+            effective_start = max(today_start_ts, int(since_ts or 0))
             
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
                 'SELECT COUNT(*) FROM trades WHERE timestamp >= ?',
-                (today_start_ts,)
+                (effective_start,)
             )
             count = cursor.fetchone()[0]
             conn.close()

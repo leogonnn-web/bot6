@@ -32,7 +32,17 @@ class RiskLimitsMixin:
                 print(f"Cooldown after loss. Remaining: {remaining}s @COOLDOWN@ ", end='\r')
                 logger.info(f"@RISK_COOLDOWN@ Cooldown active: {remaining}s remaining")
                 return False
-            daily_trades = self.trade_db.get_daily_trades_count()
+            # Real-session scoping: exclude prior dry-run trades from live
+            # limits. In real mode the baseline MUST be set, else fail-closed.
+            is_dry_run = trading_config.get('dry_run', False)
+            since_ts = float(trading_config.get('session_start_ts', 0) or 0)
+            if not is_dry_run and since_ts <= 0:
+                logger.critical(
+                    "@RISK_FAIL_CLOSED@ Real mode requires trading.session_start_ts "
+                    "(go-live epoch) to scope risk limits. BLOCKING all new entries."
+                )
+                return False
+            daily_trades = self.trade_db.get_daily_trades_count(since_ts)
             max_day_trades = trading_config.get('max_trades_per_day', 5)
             logger.info(f"@RISK_CHECK@ Daily trades: {daily_trades}/{max_day_trades}")
             if daily_trades >= max_day_trades:
@@ -40,19 +50,10 @@ class RiskLimitsMixin:
                 logger.info(f"@RISK_LIMIT@ Daily limit reached: {daily_trades}/{max_day_trades}")
                 return False
             # ── Capital protection: max loss limit ──
-            is_dry_run = trading_config.get('dry_run', False)
             try:
                 stop_loss_pct = trading_config.get('stop_loss_total', 12.0)
-                # Scope realized PnL to the real-session baseline so that prior
-                # dry-run profit cannot mask real losses. In real mode the
-                # baseline MUST be set, otherwise the loss limit is meaningless.
-                since_ts = float(trading_config.get('session_start_ts', 0) or 0)
-                if not is_dry_run and since_ts <= 0:
-                    logger.critical(
-                        "@RISK_FAIL_CLOSED@ Real mode requires trading.session_start_ts "
-                        "(go-live epoch) to scope the loss limit. BLOCKING all new entries."
-                    )
-                    return False
+                # Realized PnL scoped to the real-session baseline (since_ts,
+                # computed above) so prior dry-run profit cannot mask real losses.
                 stats = self.trade_db.get_session_stats(since_ts)
                 realized_pnl = float(stats.get('session_profit', 0.0))
                 # Get balance (dry_run uses virtual $1000)

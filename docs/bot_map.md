@@ -377,6 +377,22 @@ sudo sqlite3 /var/lib/docker/volumes/triada_shared-data/_data/trades.db
 
 ## 13. Журнал развёртывания
 
+### 2026-06-16 — 🟢 GO LIVE (реальные деньги, мини-пилот)
+- **Баланс:** реальный USDT = **$22.27** (подтверждён `tools/verify_keys.py`, auth OK).
+- **Ключи:** залиты в `~/triada/.env` (`BYBIT_API_KEY`/`SECRET`). Права: SPOT+Contracts+Earn,
+  **вывод выключен**. IP-lock пока НЕТ (у пользователя динамический IP — добавить после статики).
+- **Config (`tools/golive_config.py --golive`):** `slot_size`/`base`=6.0, `min_exchange_limit`=6.0,
+  `max_trades_per_day`=30, `hydra_net.min_order_size_usdt`=5.0, `session_start_ts`=1781598549,
+  `dry_run:false`. Убраны `H/USDT` (тонкая) и `TON/USDT` (нет на Bybit spot → ломал `fetch_tickers`).
+- **CapitalRouter** при $22: `single_shot`, **грид выключен** (порог $25), slot=$6, 1 позиция → макс. экспозиция ~$6.
+- **Защита:** capital-lock 12% = -$2.67; circuit_breaker -$3/600s; cooldown 10м после убытка.
+- **Баг-фикс при запуске:** дневной лимит ловил dry-run сделки (189/30). Добавлен `since_ts` в
+  `get_daily_trades_count` + скоупинг по `session_start_ts` в `limits.py` (fail-closed для реала).
+  Образ пересобран. Теперь `@RISK_CHECK@ 0/30`, `@RISK_OK@`.
+- **Метод деплоя:** `~/triada` — НЕ git; код через scp + `docker compose up -d --build`;
+  config через `os.replace` требует `--force-recreate` (bind-mount пинит inode).
+- **TODO:** удалить txt с ключами с Рабочего стола; статический IP + IP-lock; наблюдать первые сутки.
+
 ### 2026-06-15 — деплой риск-фиксов (всё ещё dry-run)
 - **Залито на сервер** (`~/triada/`, бэкапы `.bak-*` рядом): `src/core/risk/limits.py`,
   `src/database/models.py`. Образ `triada-hydra-bot` пересобран, `hydra-bot` пересоздан.

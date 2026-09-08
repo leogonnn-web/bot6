@@ -61,6 +61,8 @@ class WatchdogConfig:
     # NO restart can be issued. Protects against false freezes while the bot
     # is starting up (e.g. WS connect, model load, Prometheus scrape interval).
     startup_grace_sec: float = float(os.getenv("STARTUP_GRACE_SEC", "60"))
+    # Path to pause file on shared volume. If file exists, watchdog is paused.
+    pause_file_path: str = os.getenv("PAUSE_FILE_PATH", "/data/watchdog.pause")
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,10 @@ class ContainerController(Protocol):
     def restart(self, name: str, timeout: int) -> None:  # pragma: no cover
         ...
 
+    def status(self, name: str) -> str:  # pragma: no cover
+        """Return container status: 'running', 'exited', etc."""
+        ...
+
 
 class DockerContainerController:
     """Real docker controller (uses the `docker` SDK over the mounted socket)."""
@@ -114,6 +120,14 @@ class DockerContainerController:
     def restart(self, name: str, timeout: int) -> None:
         container = self._client.containers.get(name)
         container.restart(timeout=timeout)
+
+    def status(self, name: str) -> str:
+        """Return container status: 'running', 'exited', etc."""
+        try:
+            container = self._client.containers.get(name)
+            return container.status
+        except Exception:
+            return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +178,12 @@ class Watchdog:
         if now is None:
             now = time.time()
 
+        # ---- Pause flag check ----
+        # If pause file exists, watchdog is manually paused (maintenance mode).
+        if os.path.exists(self.cfg.pause_file_path):
+            logger.info("@WATCHDOG_PAUSED@ Pause file exists, skipping restart decisions")
+            return False
+
         # Cooldown after recent restart — don't re-fire instantly
         if (
             self.state.last_restart_ts
@@ -181,7 +201,8 @@ class Watchdog:
 
         # ---- Target-down tracking ----
         # If BOTH metric series have disappeared from Prometheus, the bot is
-        # almost certainly stopped or unreachable. Treat as a freeze signal.
+        # almost certainly stopped or unreachable. We track this for logging,
+        # but we no longer use it as a restart trigger (see status check below).
         if health is None and heartbeat is None:
             if self.state.target_down_since is None:
                 self.state.target_down_since = now
@@ -225,7 +246,19 @@ class Watchdog:
             and (now - self.state.target_down_since) >= threshold
         )
 
-        if health_stalled or heartbeat_stalled or target_down:
+        # ---- Container status check ----
+        # Only restart if container is actually running. If it's 'exited' or
+        # 'stopped', it was intentionally stopped — do not resurrect it.
+        container_status = self.controller.status(self.cfg.target_container)
+        if container_status != "running":
+            logger.info(
+                "@WATCHDOG_SKIP@ Container %s status=%s (not running), skipping restart",
+                self.cfg.target_container,
+                container_status,
+            )
+            return False
+
+        if health_stalled or heartbeat_stalled:
             reason = []
             if health_stalled:
                 reason.append(
@@ -235,10 +268,7 @@ class Watchdog:
                 reason.append(
                     f"heartbeat stale for {now - self.state.last_heartbeat_ts:.1f}s"
                 )
-            if target_down:
-                reason.append(
-                    f"target unreachable for {now - self.state.target_down_since:.1f}s"
-                )
+            # target_down is logged but not used as trigger (see status check above)
             logger.critical(
                 "@WATCHDOG_RESTART@ Forcing restart of %s (%s)",
                 self.cfg.target_container,

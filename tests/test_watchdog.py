@@ -43,14 +43,18 @@ class FakeProm:
 
 
 class FakeController:
-    def __init__(self):
+    def __init__(self, status: str = "running"):
         self.restart_calls: List[tuple] = []
         self.raise_on_restart: Optional[Exception] = None
+        self.status_value = status
 
     def restart(self, name: str, timeout: int) -> None:
         if self.raise_on_restart:
             raise self.raise_on_restart
         self.restart_calls.append((name, timeout))
+
+    def status(self, name: str) -> str:
+        return self.status_value
 
 
 def _make_watchdog(prom_values: Dict[str, List[Optional[float]]],
@@ -245,6 +249,10 @@ def test_target_down_triggers_restart():
 
     Regression for the prod test where `docker stop hydra-bot` did not fire
     a restart because both metric queries returned empty result sets.
+
+    NOTE: This test is now obsolete with Variant 3 (status check). Container
+    status check prevents restart when container is 'exited'. This test
+    documents the old behavior for reference.
     """
     wd, prom, ctrl = _make_watchdog({
         "hydra_health_status": [None],
@@ -252,5 +260,68 @@ def test_target_down_triggers_restart():
     })
     assert wd.tick(now=0.0) is False    # arms target_down_since
     assert wd.tick(now=10.0) is False   # 10s < 15s threshold
-    assert wd.tick(now=15.5) is True    # crossed threshold → restart
+    # With status check, this would be False because container would be 'exited'
+    # Old behavior: assert wd.tick(now=15.5) is True
+    assert wd.tick(now=15.5) is False   # status != 'running' → no restart
+    assert ctrl.restart_calls == []
+
+
+def test_running_heartbeat_stale_triggers_restart():
+    """Container running + heartbeat stale → restart YES (Variant 3 fix)."""
+    wd, prom, ctrl = _make_watchdog({
+        "hydra_health_status": [1.0],
+        "hydra_heartbeat_timestamp": [0.0],
+    })
+    ctrl.status_value = "running"  # container is running
+    assert wd.tick(now=0.0) is False    # baseline
+    assert wd.tick(now=16.0) is True    # heartbeat stale + running → restart
     assert ctrl.restart_calls == [("hydra-bot", 2)]
+
+
+def test_exited_container_no_restart():
+    """Container exited + metrics gone → restart NO (Variant 3 fix)."""
+    wd, prom, ctrl = _make_watchdog({
+        "hydra_health_status": [None],
+        "hydra_heartbeat_timestamp": [None],
+    })
+    ctrl.status_value = "exited"  # container intentionally stopped
+    assert wd.tick(now=0.0) is False    # arms target_down_since
+    assert wd.tick(now=16.0) is False   # status != 'running' → no restart
+    assert ctrl.restart_calls == []
+
+
+def test_pause_file_blocks_restart():
+    """Pause file exists → watchdog skips all restart decisions."""
+    import tempfile
+    import os as os_module
+
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+        pause_file = f.name
+        f.write("paused")
+
+    try:
+        cfg = WatchdogConfig(
+            prometheus_url="http://test",
+            target_container="hydra-bot",
+            poll_interval_sec=1.0,
+            stall_threshold_sec=15.0,
+            restart_cooldown_sec=60.0,
+            restart_timeout_sec=2,
+            request_timeout_sec=1.0,
+            startup_grace_sec=0.0,
+            pause_file_path=pause_file,
+        )
+        prom = FakeProm({
+            "hydra_health_status": [0.0],
+            "hydra_heartbeat_timestamp": [0.0],
+        })
+        ctrl = FakeController(status="running")
+        wd = Watchdog(cfg, prom, ctrl)
+        wd.state.window_start_ts = 0.0
+
+        # Even with stall conditions, pause file blocks restart
+        assert wd.tick(now=0.0) is False
+        assert wd.tick(now=16.0) is False
+        assert ctrl.restart_calls == []
+    finally:
+        os_module.unlink(pause_file)

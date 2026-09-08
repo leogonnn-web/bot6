@@ -116,9 +116,12 @@ services:
       - STALL_THRESHOLD_SEC=15
       - RESTART_COOLDOWN_SEC=60
       - LOG_LEVEL=INFO
+      - PAUSE_FILE_PATH=/data/watchdog.pause
     volumes:
       # Mount docker socket so watchdog can issue `restart` against the engine
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount shared-data for pause file support
+      - shared-data:/data
     networks:
       - triada
     logging:

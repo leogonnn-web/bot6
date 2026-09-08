@@ -129,29 +129,46 @@ class InPositionStateMixin:
                 except Exception as bal_err:
                     logger.error(f"@BALANCE_ERROR@ Balance check error for {symbol}: {bal_err}", exc_info=True)
 
-                order_id = self.state_data['order_id']
-                try:
-                    order = self.exchange.fetch_order(order_id, symbol)
-                except Exception as order_err:
-                    if "last 500 orders" in str(order_err):
-                        logger.warning(f"@ORDER_ERROR@ Order history limit reached for {symbol}, resetting state")
-                        self.state_data = {}
-                        self.state = BotState.IDLE
-                        return
-                    logger.error(f"@ORDER_ERROR@ Failed to fetch order {order_id} for {symbol}: {order_err}", exc_info=True)
-                    raise order_err
+                order_id = self.state_data.get('order_id')
+                order = None
+                if order_id:
+                    try:
+                        order = self.exchange.fetch_order(order_id, symbol)
+                    except Exception as order_err:
+                        if "last 500 orders" in str(order_err):
+                            logger.warning(f"@ORDER_ERROR@ Order history limit reached for {symbol}, resetting state")
+                            self.state_data = {}
+                            self.state = BotState.IDLE
+                            return
+                        logger.error(f"@ORDER_ERROR@ Failed to fetch order {order_id} for {symbol}: {order_err}", exc_info=True)
+                        raise order_err
 
-                if order['status'] == 'closed':
-                    close_price = safe_float(order.get('price') or order.get('average', self.state_data['buy_price']))
+                # A completed take-profit requires a *filled SELL* order. Guard against
+                # misreading the (already closed) BUY order as a sell — that bug caused
+                # instant exits at entry price (fee bleed).
+                if order is not None and order.get('side') == 'sell' and order.get('status') in ('closed', 'filled'):
+                    close_price = safe_float(order.get('average') or order.get('price') or self.state_data['buy_price'])
                     trade_profit = self._calc_pnl(self.state_data['buy_price'], close_price, self.state_data['amount'])
                     self.session_profit += trade_profit
                     METRICS.session_profit.set(self.session_profit)
                     self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], close_price, confidence=0.0, profit=trade_profit)
                     self._apply_dispatcher_feedback(trade_profit)
-                    logger.info(f"@PROFIT_TAKEN@ PROFIT! {symbol} +${trade_profit:.2f}")
+                    tag = "PROFIT_TAKEN" if trade_profit >= 0 else "LOSS_TAKEN"
+                    logger.info(f"@{tag}@ {symbol} ${trade_profit:+.2f} @ {close_price}")
                     self.state_data = {}
                     self.state = BotState.IDLE
                     return
+
+                # No valid resting SELL order (TP placement failed or order_id is not a
+                # sell order): exit via market to avoid holding an unmanaged position.
+                if order is None or order.get('side') != 'sell':
+                    logger.warning(
+                        f"@NO_TP_ORDER@ {symbol} has no resting sell order "
+                        f"(order_id={order_id}) -> market exit"
+                    )
+                    self._panic_sell(urgent=False, reason='no_tp_order')
+                    return
+
                 if is_sl_hit:
                     logger.warning(f"@STOP_LOSS_HIT@ SL hit for {symbol} ({change_percent:.2f}%)")
                     self.last_loss_time = time.time()
@@ -192,7 +209,26 @@ class InPositionStateMixin:
             except Exception as e:
                 logger.debug(f"@PANIC_CANCEL_WARN@ Failed to cancel sell order: {e}")
 
-            amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
+            # Use real available balance instead of saved amount to account for fees
+            coin_name = symbol.split('/')[0]
+            try:
+                balance = self.exchange.fetch_balance()
+                uta_coins = balance.get('info', {}).get('result', {}).get('list', [{}])[0].get('coin', [])
+                real_balance = 0.0
+                for c_data in uta_coins:
+                    if c_data.get('coin') == coin_name:
+                        real_balance = safe_float(c_data.get('equity', 0))
+                        break
+                if real_balance > 0.0001:
+                    amount = float(self.exchange.exchange.amount_to_precision(symbol, real_balance))
+                    logger.info(f"@PANIC_REAL_BALANCE@ {coin_name} real balance: {real_balance}, sell_amount: {amount}")
+                else:
+                    # Fallback to saved amount if balance read fails
+                    amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
+                    logger.warning(f"@PANIC_BALANCE_FALLBACK@ Using saved amount: {amount}")
+            except Exception as bal_err:
+                logger.warning(f"@PANIC_BALANCE_ERROR@ Failed to fetch real balance: {bal_err}, using saved amount")
+                amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
 
             # Live market snapshot
             ws = self.ws_tickers_cache.get(symbol, {})
@@ -258,9 +294,10 @@ class InPositionStateMixin:
             self.state = BotState.EXITING
             logger.info(f"@PANIC_MARKET@ {symbol} market exit reason={reason} bs={bs_reason} -> EXITING")
         except Exception as e:
-            logger.error(f"Panic sell error: {e}")
-            self.state_data = {}
-            self.state = BotState.IDLE
+            logger.error(f"Panic sell error: {e}", exc_info=True)
+            # Do NOT reset to IDLE on panic sell failure. We still hold the asset
+            # and must retry. Only reset to IDLE if balance is below dust (handled
+            # in _handle_in_position_state balance check).
 
     def _execute_partial_tp(self, symbol: str, current_price: float, partial_tp_size_pct: float, is_dry_run: bool):
         """Execute partial take profit - sell portion of position"""

@@ -24,7 +24,7 @@
 │  ├─ health.py       — passive health checks + SIGTERM watchdog   │
 │  └─ bybit_client.py — REST + raw WebSocket (V5 spot)            │
 ├─────────────────────────────────────────────────────────────────┤
-│  Go Arb Engine (hydra-arb) — пока OFF в live-конфиге           │
+│  Go Arb Engine — вынесен в отдельный репо triada-arb (2026-09) │
 ├─────────────────────────────────────────────────────────────────┤
 │  Shared State (Docker volume triada_shared-data)                │
 │  ├─ trades.db       — SQLite (FIFO PnL, dispatcher_features)    │
@@ -333,7 +333,6 @@ sudo sqlite3 /var/lib/docker/volumes/triada_shared-data/_data/trades.db
 | `websocket` | `reconnect_interval_sec` | 5 | Бэкофф |
 | `scanner` | `enabled` | true | Сканер |
 | `scanner` | `cache_ttl` | 600 | TTL hot_symbols |
-| `arbitrage` | `enabled` | true | Go arb (в конфиге, но может быть выключен) |
 
 ---
 

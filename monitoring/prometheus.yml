@@ -12,9 +12,3 @@ scrape_configs:
       - targets: ['hydra-bot:9090']
         labels:
           instance: triada_main
-
-  - job_name: hydra_arb
-    static_configs:
-      - targets: ['hydra-arb:9091']
-        labels:
-          instance: triada_arb

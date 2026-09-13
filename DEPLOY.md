@@ -29,26 +29,35 @@ docker compose ps
 
 | Service | Port | URL |
 |---------|------|-----|
-| HYDRA Bot (Python) | 9090 | `http://host:9090/metrics` |
-| Arb Engine (Go) | 9091 | `http://host:9091/metrics` |
+| HYDRA Bot (Python) | 9090 | `http://host:9090/metrics` (also `/maintenance` — operator IP only) |
 | Prometheus | 9092 | `http://host:9092` |
 | Grafana | 3000 | `http://host:3000` |
+
+All ports are restricted to `var.your_ip_cidr` in `terraform/main.tf`. The Go arbitrage
+engine and scalper were moved to separate repositories (`triada-arb`, `triada-scalper`) on
+2026-09-09; if an old `hydra-arb` container is still present on the host, run
+`docker compose up -d --remove-orphans`.
 
 ## Architecture
 
 ```
-┌─────────────┐   capital_state.json   ┌──────────────┐
-│  HYDRA Bot  │ ─────────────────────► │  Arb Engine  │
-│  (Python)   │   shared Docker volume │  (Go)        │
-│  :9090      │                        │  :9091       │
-└──────┬──────┘                        └──────┬───────┘
-       │ metrics                              │ metrics
-       ▼                                      ▼
+┌─────────────┐   capital_state.json   ┌────────────────────────────┐
+│  HYDRA Bot  │ ─────────────────────► │  triada-arb (separate repo,│
+│  (Python)   │   shared Docker volume │  optional, detection only) │
+│  :9090      │                        └────────────────────────────┘
+└──────┬──────┘
+       │ metrics
+       ▼
 ┌──────────────┐        ┌──────────────┐
 │  Prometheus  │ ◄───── │              │
 │  :9092       │        │   Grafana    │
 │              │ ─────► │   :3000      │
 └──────────────┘        └──────────────┘
+       ▲
+       │ health / heartbeat
+┌──────────────┐
+│  watchdog    │ ── docker.sock ──► restart hydra-bot
+└──────────────┘
 ```
 
 ## Logs
@@ -59,7 +68,7 @@ docker compose logs -f
 
 # Specific service
 docker compose logs -f hydra-bot
-docker compose logs -f hydra-arb
+docker compose logs -f watchdog
 ```
 
 ## Common Operations
@@ -90,6 +99,6 @@ Alerts are configured in `monitoring/alert_rules.yml`:
 ## Security Checklist
 - [ ] `.env` file has real API keys (never commit to git)
 - [ ] `GRAFANA_PASSWORD` changed from default
-- [ ] EC2 Security Group: only ports 3000, 9092 open (or VPN only)
-- [ ] Ports 9090, 9091 NOT exposed publicly (internal only)
+- [ ] EC2 Security Group: 3000, 9090, 9092 restricted to `your_ip_cidr` (terraform/main.tf) — 9090 serves the unauthenticated `POST /maintenance`
+- [ ] `terraform apply` re-run after any SG change (the tf file alone changes nothing)
 - [ ] Bybit API key has IP whitelist + spot-only permissions

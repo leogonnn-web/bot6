@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────────────────
-# TRIADA Trading System — Docker Compose
-# Components: Python Bot + Go Arb Engine + Prometheus + Grafana
+# HYDRA Trading Bot — Docker Compose
+# Components: Python Bot + Prometheus + Grafana + Watchdog
+# (Go arb engine and scalper live in separate repos: triada-arb, triada-scalper)
 # ─────────────────────────────────────────────────────────
 
 services:
@@ -32,34 +33,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-
-  # ── Go Arbitrage Engine ──
-  hydra-arb:
-    build:
-      context: ./arb-engine
-      dockerfile: Dockerfile
-    container_name: hydra-arb
-    restart: unless-stopped
-    depends_on:
-      hydra-bot:
-        condition: service_healthy
-    volumes:
-      - shared-data:/data
-    ports:
-      - "9091:9091"   # Prometheus metrics
-    networks:
-      - triada
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9091/metrics"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
 
   # ── Prometheus ──
   prometheus:
@@ -131,7 +104,7 @@ services:
         max-file: "3"
 
 volumes:
-  shared-data:        # capital_state.json exchange between bot ↔ arb
+  shared-data:        # hydra_state.json, trades.db, capital_state.json (contract for external triada-arb), watchdog.pause
   prometheus-data:
   grafana-data:
 

@@ -85,7 +85,16 @@ triada.zip
 bot_local.log
 compare_logs_output.txt
 
-# Go build artifacts
-arb-engine/hydra-arb
-arb-engine/hydra-arb.exe
+# Binaries (Go components moved to triada-arb / triada-scalper repos)
 *.exe
+*.exe~
+
+# Terraform: real vars contain operator IP — keep only the .example in git
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/*.zip
+terraform/terraform.exe
+
+# One-off diagnostic scripts must not accumulate in the repo root again
+/tmp_*.py
+/tmp_*.sh

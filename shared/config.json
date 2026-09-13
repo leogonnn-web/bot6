@@ -294,17 +294,5 @@
       "btc_crash_penalty": 1.0,
       "flet_bonus": -0.3
     }
-  },
-  "arbitrage": {
-    "enabled": true,
-    "min_profit_pct": 0.05,
-    "fee_per_leg_pct": 0.1,
-    "scan_interval_ms": 50,
-    "symbols": [
-      "BTCUSDT",
-      "ETHUSDT",
-      "ETHBTC"
-    ],
-    "metrics_port": 9091
   }
 }

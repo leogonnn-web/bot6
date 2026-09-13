@@ -14,9 +14,11 @@ __pycache__
 .pytest_cache
 *.egg-info
 
-# Go
-arb-engine/hydra-arb.exe
-arb-engine/hydra-arb
+# Infra / docs not needed in the bot image
+terraform/
+monitoring/
+docs/
+*.exe
 
 # Env (keys stay on host, injected via docker-compose)
 .env

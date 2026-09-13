@@ -24,10 +24,13 @@
 | Контейнер | Сервис в compose | Порт |
 |---|---|---|
 | `hydra-bot` | `hydra-bot` | `9090` (метрики Prometheus) |
-| `hydra-arb` | `hydra-arb` | `9091` |
 | `triada-prometheus` | `prometheus` | `9092` → UI |
 | `triada-grafana` | `grafana` | `3000` |
 | `triada-watchdog` | `watchdog` | — |
+
+**2026-09-09:** `hydra-arb` (arb-engine) и `go-scalper` вынесены в отдельные репозитории
+`triada-arb` и `triada-scalper`. На сервере контейнер `hydra-arb` мог остаться от старого compose —
+при следующем деплое выполнить `sudo docker compose up -d --remove-orphans`.
 
 **Важно:** в `docker compose stop/up` используется **имя сервиса**, а не имя контейнера.
 `docker compose stop triada-watchdog` → ошибка. Правильно: `docker compose stop watchdog`.

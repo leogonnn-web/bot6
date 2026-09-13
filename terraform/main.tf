@@ -62,39 +62,31 @@ resource "aws_security_group" "triada" {
     description = "SSH access"
   }
 
-  # Grafana
+  # Grafana (operator IP only)
   ingress {
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.your_ip_cidr]
     description = "Grafana UI"
   }
 
-  # Prometheus (bot metrics)
+  # Bot metrics + /maintenance control endpoint — MUST NOT be world-reachable
+  # (POST /maintenance force-closes the open position without authentication).
   ingress {
     from_port   = 9090
     to_port     = 9090
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Bot Prometheus metrics"
+    cidr_blocks = [var.your_ip_cidr]
+    description = "Bot Prometheus metrics / maintenance"
   }
 
-  # Prometheus (arb metrics)
-  ingress {
-    from_port   = 9091
-    to_port     = 9091
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Arb Prometheus metrics"
-  }
-
-  # Prometheus UI
+  # Prometheus UI (operator IP only)
   ingress {
     from_port   = 9092
     to_port     = 9092
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.your_ip_cidr]
     description = "Prometheus UI"
   }
 

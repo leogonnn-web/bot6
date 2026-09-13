@@ -1,41 +1,53 @@
-# TRIADA v5.4 — Absolute Pure
-## Master Architecture Specification
+# HYDRA — Bybit spot dump-catch bot
+## Architecture Specification (historical, see note)
 
-**Last Updated:** 2026-05-24  
-**Target Runtime:** Python 3.11 + Go 1.22  
-**Deployment:** AWS ap-southeast-1 (Singapore), Bare Metal via Terraform  
+**Last Updated:** 2026-09-09  
+**Target Runtime:** Python 3.11  
+**Deployment:** AWS ap-southeast-1 (Singapore), Docker Compose, Terraform  
 **Audience:** Autonomous AI Coding Agent (Windsurf Cascade / SWE-agent)
+
+> **Read first:** `docs/audit/00_full_audit_2026-09-06.md` (6 critical / 10 high findings, phased fix plan)
+> and `docs/HANDOFF.md` (real-money pilot state). Sections 1–3 below are the original v5.4 design
+> document; several of its "verified invariants" and "forbidden actions" are contradicted by the audit
+> (e.g. the HealthChecker state-stuck check compares an Enum to strings and never fires).
+> Treat the audit as the source of truth where they disagree.
+
+> **2026-09-09 — repository split.** The Go components were extracted into separate projects:
+> - `triada-scalper` (was `go-scalper/`) — standalone Bybit scalper, no coupling with Hydra.
+> - `triada-arb` (was `arb-engine/`) — triangular arbitrage scanner; its only link to Hydra is
+>   `capital_state.json` written by `shared/capital_router.py` (contract documented in that repo).
+> This repository now contains **only the Python bot + its monitoring**.
 
 ---
 
 ## 1. EXECUTIVE SYSTEM ARCHITECTURE
 
-Triada is a split-logic algorithmic trading cluster. The Python Ingress handles strategy, scanning, and capital routing. The Go Arb Engine handles sub-millisecond triangular arbitrage. Both systems share a single source of truth via Docker volume-mounted JSON files.
+Hydra is a single-position spot bot: background WS scan → REST validation → limit entry (optionally a
+Martingale grid) → take-profit / stop / limit-chase exit. Capital routing (`CapitalRouter`) decides grid
+depth from free USDT and publishes `capital_state.json` for external consumers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            TRIADA CLUSTER v5.4                               │
-├─────────────────────────────┬───────────────────────────────────────────────┤
-│      PYTHON INGRESS         │         GO ARBITRAGE ENGINE                  │
-│  (Strategy + Execution)     │     (Ultra-Latency WebSocket Arb)            │
-├─────────────────────────────┼───────────────────────────────────────────────┤
-│  src/core/bot.py            │  arb-engine/engine/slot.go                    │
-│  src/core/scanner.py        │  arb-engine/exchange/bybit_ws.go              │
-│  shared/capital_router.py   │  arb-engine/strategy/triangular.go           │
-│  shared/order_manager.py    │  arb-engine/bridge/capital.go                 │
-│  src/core/health.py         │  arb-engine/ringbuf/spsc.go                  │
-│  src/api/bybit_client.py    │  arb-engine/metrics/prom.go                   │
-├─────────────────────────────┴───────────────────────────────────────────────┤
-│                    SHARED SINGLE SOURCE OF TRUTH                             │
-│  shared/capital_state.json  (CapitalRouter writes, Go Arb reads)           │
-│  shared/hot_symbols.txt     (Scanner writes, Bot + Arb reads)              │
-│  shared/state/trades.db     (SQLite — FIFO PnL, session stats)              │
-│  logs/bot.log               (Structured logging with @TAGS@)               │
+│                               HYDRA BOT                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  src/core/bot.py            state machine + run loop                        │
+│  src/core/states/*.py       IDLE / SCANNING / BUYING / IN_POSITION / EXITING│
+│  src/core/grid/hydra_net.py Martingale grid (HYDRA-NET)                     │
+│  src/core/risk/*.py         limits, circuit breaker, breakeven              │
+│  shared/capital_router.py   balance → mode / max_grid_levels                │
+│  shared/order_manager.py    order facade                                    │
+│  src/api/bybit_client.py    ccxt REST + raw Bybit V5 WebSocket              │
+│  src/core/health.py         in-process health checks                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                    STATE (Docker volume shared-data)                        │
+│  hydra_state.json           open position / state_data (survives restart)   │
+│  capital_state.json         CapitalRouter output (contract for triada-arb)  │
+│  state/trades.db            SQLite — trades, dispatcher features            │
+│  watchdog.pause             manual watchdog override                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                    INFRASTRUCTURE LAYER (Docker)                            │
 │  hydra-bot        : Python bot container (main.py)                          │
-│  hydra-arb        : Go arb engine container                                 │
-│  triada-prometheus: Metrics scraper (:9090 bot, :9091 arb, :9092 UI)       │
+│  triada-prometheus: Metrics scraper (:9090 bot, :9092 UI)                   │
 │  triada-grafana   : Live dashboard (:3000)                                  │
 │  triada-watchdog  : External self-healing supervisor (docker.sock mount)   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -53,16 +65,12 @@ Triada is a split-logic algorithmic trading cluster. The Python Ingress handles 
 | **WebSocket Listener** | `src/api/bybit_client.py` | Raw `websockets` connection to Bybit V5 public spot stream (`wss://stream.bybit.com/v5/public/spot`). Batch subscribe (max 10 topics per message). Auto-reconnect with exponential backoff. Replaces REST polling as primary price source. |
 | **Prometheus Metrics** | `shared/metrics.py` | `hydra_health_status`, `balance_usdt`, `grid_max_levels`, order counters. Uses global `REGISTRY`. |
 
-### 1.2 Go Arb Engine (Ultra-Low Latency)
+### 1.2 External Go components (separate repositories since 2026-09-09)
 
-| Component | File | Responsibility |
-|-----------|------|----------------|
-| **MarketSlot** | `arb-engine/engine/slot.go` | 192-byte struct, 3 cache lines. SeqLock with atomic ops. |
-| **SPSC Ring** | `arb-engine/ringbuf/spsc.go` | Lock-free ring buffer, cache-line padded head/tail. |
-| **Bybit WS** | `arb-engine/exchange/bybit_ws.go` | WebSocket ticker subscription, writes into MarketSlots. |
-| **Triangular Scanner** | `arb-engine/strategy/triangular.go` | Forward + reverse USDT→BTC→ETH→USDT with fee-adjusted profit calc. |
-| **Capital Bridge** | `arb-engine/bridge/capital.go` | Reads `shared/capital_state.json`, blocks until `arb_allowed=true`. |
-| **Prometheus** | `arb-engine/metrics/prom.go` | `:9091` — arb scans/signals/profit/latency counters. |
+| Project | Was | Coupling with Hydra |
+|---------|-----|---------------------|
+| `triada-arb` | `arb-engine/` | Reads `capital_state.json` (`arb_allowed` flips at `available >= $200`, see `shared/capital_router.py` `ARB_UNLOCK`). Detection only, places no orders. |
+| `triada-scalper` | `go-scalper/` | None. Must run on a **separate** API key / subaccount — both bots size against the whole spot balance. |
 
 ### 1.3 Systemic Risk Invariants
 
@@ -105,9 +113,8 @@ Key Test Modules:
 
 | Service | Container | Port | Status |
 |---------|-----------|------|--------|
-| HYDRA Bot | `hydra-bot` | internal | Running on AWS |
-| Go Arb Engine | `hydra-arb` | internal | Running on AWS |
-| Prometheus | `triada-prometheus` | `:9090` (bot), `:9091` (arb) | Scraping both endpoints |
+| HYDRA Bot | `hydra-bot` | internal | See `docs/HANDOFF.md` — server state unconfirmed since 2026-06-17 |
+| Prometheus | `triada-prometheus` | `:9090` (bot) | Scrapes `hydra-bot:9090` |
 | Grafana | `triada-grafana` | `:3000` | Live dashboard accessible |
 
 **Deployment Method:** Terraform-provisioned AWS EC2 (ap-southeast-1) + Docker Compose multi-stage builds. Automated `scp` + `docker compose up -d --build` from local workspace.
@@ -195,23 +202,8 @@ triada/
 │   │   └── trades.db                # SQLite production DB (Docker volume)
 │   └── capital_state.json           # Live capital mode + max_grid_levels (Go bridge reads this)
 │
-├── arb-engine/                      # Go 1.22 ultra-latency arbitrage
-│   ├── engine/
-│   │   └── slot.go                  # MarketSlot (192 bytes, SeqLock)
-│   ├── exchange/
-│   │   └── bybit_ws.go              # Bybit WS consumer → MarketSlot writer
-│   ├── strategy/
-│   │   └── triangular.go            # Triangular arb: USDT→BTC→ETH→USDT
-│   ├── bridge/
-│   │   └── capital.go               # Reads shared/capital_state.json
-│   ├── ringbuf/
-│   │   └── spsc.go                  # Lock-free SPSC ring buffer
-│   ├── metrics/
-│   │   └── prom.go                  # Prometheus counters (:9091)
-│   └── go.mod                       # Go module definition
-│
 ├── monitoring/
-│   ├── prometheus.yml               # Scrape configs (:9090 bot, :9091 arb)
+│   ├── prometheus.yml               # Scrape config (:9090 bot)
 │   ├── grafana_dashboard.json       # 12-panel live dashboard
 │   └── alert_rules.yml              # 7 Prometheus alert rules
 │
@@ -275,13 +267,7 @@ triada/
     "cache_ttl": 600,
     "use_priority": true
   },
-  "metrics": { "port": 9090 },
-  "arbitrage": {
-    "enabled": true,
-    "min_profit_pct": 0.05,
-    "scan_interval_ms": 50,
-    "metrics_port": 9091
-  }
+  "metrics": { "port": 9090 }
 }
 ```
 
@@ -327,6 +313,7 @@ TANK_MODE=false   # Legacy; now controlled via config.json trading.tank_mode
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| repo split | 2026-09-09 | `go-scalper/` → `triada-scalper`, `arb-engine/` → `triada-arb` (separate repos). `tmp_*.py` removed. Terraform SG closed to operator IP. Full technical audit added (`docs/audit/`). |
 | v5.4-Absolute Pure | 2026-05-24 | WebSocket real-time ticker mode enabled. HealthChecker fully async. 65/65 tests green. |
 | v5.3 | 2026-05-20 | HealthChecker refactoring, Prometheus registry fix, CapitalRouter tier locking. |
 | v5.2 | 2026-05-15 | Go Arb Engine integration, Docker Compose orchestration, Grafana dashboard. |

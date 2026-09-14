@@ -16,7 +16,7 @@ import json
 import random
 import threading
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 # Add shared/ to path BEFORE importing shared modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'shared')))
@@ -117,6 +117,8 @@ class TradingBot(
         # hammering Bybit (HTTP 429) when WS is briefly stale.
         self._last_rest_fallback_time = 0.0
         self._rest_fallback_min_interval = 5.0  # seconds
+        # Per-symbol throttle for _get_fresh_price REST fallback
+        self._price_rest_ts: Dict[str, float] = {}
         self.should_stop = False
         self.loop_counter = 0
         # Don't cache trading_config - always read fresh from config
@@ -310,9 +312,13 @@ class TradingBot(
                 return  # State is valid, position exists
             # Check if we hold the base currency (e.g. SHIB)
             base = symbol.split('/')[0]
-            bal = self.exchange.fetch_balance()
-            base_hold = bal.get(base, {}).get('free', 0.0)
-            if float(base_hold) > 0:
+            base_hold = self.exchange.get_coin_balance(base)
+            if base_hold is None:
+                # Exchange unreachable: trusting the saved state is the safe default.
+                # Resetting here would orphan a real position on a transient API error.
+                logger.warning(f"@RECOVER_UNKNOWN@ Balance unavailable for {base}; keeping saved {self.state.name}")
+                return
+            if base_hold > self._dust_threshold(symbol):
                 logger.info(f"@RECOVER@ Holding {base_hold} {base}, state valid")
                 return  # We hold the asset, state is valid
             # No open orders, no asset → position was closed or never existed
@@ -324,6 +330,101 @@ class TradingBot(
             logger.info("@STATE_CLEAN@ Session profit reset to 0 after ghost recovery")
         except Exception as e:
             logger.error(f"@RECOVER_ERROR@ Exchange recovery failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Exchange-truth helpers: fresh price, dust threshold, reconciled IDLE
+    # ------------------------------------------------------------------
+    def _dust_threshold(self, symbol: str) -> float:
+        """Smallest amount that still counts as a position (exchange min lot if known)."""
+        try:
+            market = self.exchange.exchange.markets.get(symbol) or {}
+            min_amt = safe_float(((market.get('limits') or {}).get('amount') or {}).get('min'))
+            if min_amt > 0:
+                return min_amt
+        except Exception:
+            pass
+        return 0.0001
+
+    def _get_fresh_price(self, symbol: str, max_age_sec: float = 15.0) -> Optional[Dict]:
+        """Price dict {'last','bid','ask','timestamp'} no older than max_age_sec.
+
+        Prefers the WS cache; falls back to a per-symbol throttled REST call.
+        Returns None when no trustworthy price exists — callers must NOT
+        evaluate stops/targets against a stale or missing price.
+        """
+        now = time.time()
+        ws = self.ws_tickers_cache.get(symbol)
+        if ws and safe_float(ws.get('last')) > 0 and (now - safe_float(ws.get('timestamp'))) <= max_age_sec:
+            return ws
+        if now - self._price_rest_ts.get(symbol, 0.0) < 2.0:
+            return None
+        self._price_rest_ts[symbol] = now
+        ticker = self.exchange.fetch_ticker(symbol)
+        if not ticker:
+            return None
+        last = safe_float(ticker.get('last'))
+        if last <= 0:
+            return None
+        price = {
+            'last': last,
+            'bid': safe_float(ticker.get('bid')) or last,
+            'ask': safe_float(ticker.get('ask')) or last,
+            'timestamp': now,
+            'source': 'rest',
+        }
+        self.ws_tickers_cache[symbol] = price
+        logger.debug(f"@PRICE_REST@ {symbol} ws stale, using REST last={last}")
+        return price
+
+    def _transition_to_idle(self, reason: str) -> bool:
+        """The ONLY sanctioned way to enter IDLE from a position-bearing state.
+
+        IDLE means "we hold nothing". Before accepting that, ask the exchange:
+          * balance unknown  -> stay in the current state (defer), return False
+          * coin still held  -> adopt the position (IN_POSITION, no TP order) so the
+                                IN_POSITION handler resolves it; return False
+          * confirmed empty  -> IDLE, return True
+        Dry-run positions have no exchange footprint and go straight to IDLE.
+        """
+        symbol = self.state_data.get('symbol')
+        is_dry_run = bool(self.state_data.get('is_dry_run', self.config.get_trading_config().get('dry_run', False)))
+        if symbol and not is_dry_run:
+            coin = symbol.split('/')[0]
+            held = self.exchange.get_coin_balance(coin)
+            if held is None:
+                logger.warning(f"@IDLE_DEFERRED@ {symbol} ({reason}): balance unknown, staying in {self.state.name}")
+                return False
+            if held > self._dust_threshold(symbol):
+                sd = self.state_data
+                buy_price = safe_float(sd.get('buy_price'))
+                if buy_price <= 0:
+                    px = self._get_fresh_price(symbol)
+                    buy_price = safe_float(px.get('last')) if px else 0.0
+                logger.critical(
+                    f"@IDLE_REFUSED@ {symbol} ({reason}): exchange still holds {held} {coin} "
+                    f"-> adopting as IN_POSITION without TP order"
+                )
+                self.state_data = {
+                    'symbol': symbol,
+                    'buy_price': buy_price,
+                    'amount': held,
+                    'buy_time': sd.get('buy_time') or time.time(),
+                    'is_dry_run': False,
+                    'target_sell_price': sd.get('target_sell_price'),
+                    'order_id': None,
+                    'is_breakeven': sd.get('is_breakeven', False),
+                    'partial_tp_hit': sd.get('partial_tp_hit', False),
+                    'trailing_high': sd.get('trailing_high') or buy_price,
+                    'dispatcher_features': sd.get('dispatcher_features', {}),
+                    'reconcile_reason': reason,
+                }
+                self.state = BotState.IN_POSITION
+                self._save_state()
+                return False
+        logger.info(f"@IDLE_ENTER@ {symbol or '-'} ({reason})")
+        self.state_data = {}
+        self.state = BotState.IDLE
+        return True
 
     # ------------------------------------------------------------------
     # Cooldown helpers (per-symbol)
@@ -561,9 +662,12 @@ class TradingBot(
                 # In dry-run use a virtual balance
                 balance_usdt = 1000.0
             else:
-                balance = self.exchange.fetch_balance()
-                free_section = balance.get('free') if isinstance(balance, dict) else None
-                balance_usdt = safe_float(free_section.get('USDT', 0)) if isinstance(free_section, dict) else 0.0
+                balance_usdt = self.exchange.get_free_usdt()
+                if balance_usdt is None:
+                    # Unknown balance: keep the previous CapitalRouter decision rather
+                    # than pushing 0 (which flipped mode to 'frozen' on every hiccup).
+                    logger.warning("@CAPITAL_EVAL_SKIP@ balance unknown, keeping previous allocation")
+                    return
 
             self.balance = balance_usdt
             base_slot = trading_config.get('slot_size', 12.0)
@@ -775,22 +879,10 @@ class TradingBot(
             slot_size = trading_config.get('slot_size', 18.0)
             min_required = trading_config.get('min_exchange_limit', 5.2)
             threshold = max(slot_size, min_required)
-            balance = self.exchange.fetch_balance()
-            free_usdt = 0.0
-            free_section = balance.get('free') if isinstance(balance, dict) else None
-            if isinstance(free_section, dict):
-                free_usdt = safe_float(free_section.get('USDT', 0))
-            if free_usdt <= 0:
-                try:
-                    coins = balance.get('info', {}).get('result', {}).get('list', [{}])[0].get('coin', [])
-                    for c in coins:
-                        if c.get('coin') == 'USDT':
-                            free_usdt = safe_float(
-                                c.get('availableToWithdraw') or c.get('walletBalance') or c.get('equity', 0)
-                            )
-                            break
-                except Exception as parse_err:
-                    logger.debug(f"@BALANCE_PARSE_WARN@ Bybit UTA balance parse failed: {parse_err}")
+            free_usdt = self.exchange.get_free_usdt()
+            if free_usdt is None:
+                logger.warning("@BALANCE_UNKNOWN@ Cannot verify free USDT -> not entering")
+                return False
             if free_usdt < threshold:
                 logger.warning(f"@BALANCE_LOW@ Free USDT: ${free_usdt:.2f} < required ${threshold:.2f}")
                 return False
@@ -868,11 +960,10 @@ class TradingBot(
             ws_data = self.ws_tickers_cache.get(btc_symbol, {})
 
             if not ws_data:
-                try:
-                    btc_ticker = self.exchange.fetch_ticker(btc_symbol)
-                    current_price = safe_float(btc_ticker['last'])
-                except Exception as e:
-                    logger.warning(f"Failed to fetch BTC price: {e}")
+                btc_ticker = self.exchange.fetch_ticker(btc_symbol)
+                current_price = safe_float(btc_ticker.get('last')) if btc_ticker else 0.0
+                if current_price <= 0:
+                    logger.warning("@BTC_PRICE_UNKNOWN@ BTC price unavailable, skipping trend filter")
                     return True
             else:
                 current_price = safe_float(ws_data.get('last'))

@@ -60,9 +60,10 @@ class RiskLimitsMixin:
                 if is_dry_run:
                     balance_usdt = 1000.0
                 else:
-                    bal = self.exchange.fetch_balance()
-                    free_section = bal.get('free') if isinstance(bal, dict) else None
-                    balance_usdt = float(free_section.get('USDT', 0)) if isinstance(free_section, dict) else 0.0
+                    balance_usdt = self.exchange.get_free_usdt()
+                    if balance_usdt is None:
+                        logger.critical("@RISK_FAIL_CLOSED@ Balance unknown -> cannot verify capital protection, BLOCKING new entries.")
+                        return False
                 max_loss_usdt = balance_usdt * (stop_loss_pct / 100.0)
                 if realized_pnl < -max_loss_usdt:
                     logger.critical(

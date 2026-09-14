@@ -85,7 +85,10 @@ class HydraNetMixin:
             else:
                 try:
                     order = self.exchange.fetch_order(order_id, symbol)
-                    if order['status'] in ['closed', 'filled']:
+                    if order is None:
+                        logger.warning(f"@GRID_STATUS_UNKNOWN@ {symbol} order {order_id}: status unknown, skipping sync")
+                        return
+                    if order.get('status') in ['closed', 'filled']:
                         logger.info(f"@GRID_FILLED@ Колено исполнено для {symbol}")
                         self._on_grid_level_filled(order)
                         return
@@ -263,9 +266,11 @@ class HydraNetMixin:
                 logger.info(f"@GRID_COMPLETE@ Все колена сетки заполнены! Ждем отскока к TP: {actual_qty} монеты по средней цене {avg_price:.6f}")
 
         except Exception as e:
-            logger.error(f"@GRID_ERROR@ Критическая ошибка при обработке колена: {e}")
-            self.state_data = {}
-            self.state = BotState.IDLE
+            # Coins from already-filled levels are on the exchange. Never drop to IDLE
+            # blindly: let the balance decide (adopts the position if still held).
+            logger.error(f"@GRID_ERROR@ Критическая ошибка при обработке колена: {e}", exc_info=True)
+            self.state_data['is_grid_active'] = False
+            self._transition_to_idle('grid_level_error')
 
     def _update_take_profit_for_grid(self, symbol: str, amount: float, avg_price: float) -> None:
         """
@@ -317,10 +322,9 @@ class HydraNetMixin:
 
             time.sleep(2.5)  # Wait for balance update
 
-            # Get actual balance
-            balance = self.exchange.fetch_balance()
+            # Get actual balance (None = unknown -> fall back to the order's filled amount)
             coin_name = symbol.split('/')[0]
-            actual_qty = safe_float(balance['free'].get(coin_name, 0))
+            actual_qty = self.exchange.get_coin_balance(coin_name) or 0.0
 
             # Use filled amount from order if balance is 0
             filled = safe_float(order.get('filled', self.state_data.get('amount', 0)))

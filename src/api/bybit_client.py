@@ -422,21 +422,103 @@ class BybitClient:
             logger.error(f"@PRECISION_ERROR@ price_to_precision: {e}")
             return str(price)
     
-    def fetch_balance(self) -> Dict:
+    def fetch_balance(self) -> Optional[Dict]:
         """Get account balance.
 
-        SAFETY: only return a virtual $1000 balance when API keys are missing
-        (i.e. dry-run / unconfigured environment). In LIVE mode any error must
-        surface as zero balance so CapitalRouter does NOT silently promote the
-        bot to a higher tier on transient network failures.
+        Returns the ccxt balance dict, or **None** when the exchange could not be
+        queried. Callers MUST treat None as "unknown" and not as "zero": a zero
+        balance was previously fabricated here on error, which made the
+        single-position invariant fail-open and reset live positions to IDLE.
+
+        Only when API keys are missing (dry-run / unconfigured environment) a
+        virtual $1000 balance is returned so dry-run can run without keys.
         """
         if not self.api_key or not self.secret:
             return {'free': {'USDT': 1000.0}, 'total': {'USDT': 1000.0}}
         try:
             return self.exchange.fetch_balance()
         except Exception as e:
-            logger.error(f"@EXCHANGE_ERROR@ fetch_balance failed (LIVE): {e}")
-            return {'free': {'USDT': 0.0}, 'total': {'USDT': 0.0}}
+            logger.error(f"@BALANCE_UNKNOWN@ fetch_balance failed (LIVE): {e}")
+            return None
+
+    @staticmethod
+    def _coin_from_balance(balance: Dict, coin: str, prefer_free: bool) -> float:
+        """Extract one coin's amount from a ccxt balance dict.
+
+        Bybit UTA exposes the authoritative per-coin numbers under
+        info.result.list[0].coin[]; classic spot accounts only have the unified
+        free/total sections. Precedence:
+          UTA: equity -> walletBalance (or availableToWithdraw first if prefer_free)
+          unified: free (if prefer_free) -> total -> free
+        Returns 0.0 when the coin is simply absent (balance WAS fetched).
+        """
+        try:
+            coins = (((balance.get('info') or {}).get('result') or {}).get('list') or [{}])[0].get('coin') or []
+        except Exception:
+            coins = []
+        for c in coins:
+            if c.get('coin') != coin:
+                continue
+            if prefer_free:
+                keys = ('availableToWithdraw', 'walletBalance', 'equity')
+            else:
+                keys = ('equity', 'walletBalance', 'availableToWithdraw')
+            for k in keys:
+                v = safe_float(c.get(k))
+                if v > 0:
+                    return v
+            return 0.0
+        sections = ('free', 'total') if prefer_free else ('total', 'free')
+        for sec in sections:
+            section = balance.get(sec)
+            if isinstance(section, dict) and coin in section:
+                return safe_float(section.get(coin))
+        return 0.0
+
+    def get_coin_balance(self, coin: str) -> Optional[float]:
+        """Held amount of `coin` (UTA equity / unified total).
+
+        None = exchange unreachable (unknown), 0.0 = confirmed not held.
+        """
+        bal = self.fetch_balance()
+        if bal is None:
+            return None
+        return self._coin_from_balance(bal, coin, prefer_free=False)
+
+    def get_free_usdt(self) -> Optional[float]:
+        """Free USDT available for a new order. None = unknown."""
+        bal = self.fetch_balance()
+        if bal is None:
+            return None
+        return self._coin_from_balance(bal, 'USDT', prefer_free=True)
+
+    def get_non_usdt_holdings(self) -> Optional[Dict[str, float]]:
+        """{coin: amount} for every non-USDT coin with a positive balance.
+
+        None = unknown (exchange unreachable). Used by the single-position
+        invariant, which must be fail-closed: unknown -> no new buy.
+        """
+        bal = self.fetch_balance()
+        if bal is None:
+            return None
+        holdings: Dict[str, float] = {}
+        try:
+            coins = (((bal.get('info') or {}).get('result') or {}).get('list') or [{}])[0].get('coin') or []
+        except Exception:
+            coins = []
+        if coins:
+            for c in coins:
+                name = c.get('coin', '')
+                amt = safe_float(c.get('equity')) or safe_float(c.get('walletBalance'))
+                if name and name != 'USDT' and amt > 0:
+                    holdings[name] = amt
+            return holdings
+        total = bal.get('total')
+        if isinstance(total, dict):
+            for name, amt in total.items():
+                if name != 'USDT' and safe_float(amt) > 0:
+                    holdings[name] = safe_float(amt)
+        return holdings
     
     def fetch_tickers(self, symbols: List[str]) -> Dict:
         """Get tickers for multiple symbols"""
@@ -446,13 +528,14 @@ class BybitClient:
             logger.error(f"@EXCHANGE_ERROR@ fetch_tickers: {e}")
             return {}
     
-    def fetch_ticker(self, symbol: str) -> Dict:
-        """Get ticker for single symbol"""
+    def fetch_ticker(self, symbol: str) -> Optional[Dict]:
+        """Get ticker for single symbol. None on error (never a zero price:
+        a fabricated last=0 used to read as -100% and trigger the stop-loss)."""
         try:
             return self.exchange.fetch_ticker(symbol)
         except Exception as e:
             logger.error(f"@EXCHANGE_ERROR@ fetch_ticker for {symbol}: {e}")
-            return {'last': 0.0, 'ask': 0.0, 'bid': 0.0}
+            return None
     
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 60) -> List:
         """Get OHLCV candle data"""
@@ -549,22 +632,30 @@ class BybitClient:
         logger.error(f"@ORDER_ERROR@ Amend failed for {order_id} after {max_retries} retries")
         return None
     
-    def fetch_order(self, order_id: str, symbol: str) -> Dict:
-        """Get order status with fallback"""
+    def fetch_order(self, order_id: str, symbol: str) -> Optional[Dict]:
+        """Get order status.
+
+        Returns the ccxt order dict, or **None** when the status could not be
+        determined after 3 attempts. Never fabricates a status: the old
+        `{'status': 'closed', 'filled': 0.0}` fallback made a 1.5 s API hiccup
+        look like a filled-for-nothing order and triggered market exits.
+        """
+        last_err: Optional[Exception] = None
         for attempt in range(3):
             try:
                 return self.exchange.fetch_order(order_id, symbol, params={"acknowledged": True})
             except Exception as e:
+                last_err = e
                 if "last 500 orders" in str(e):
                     try:
                         time.sleep(0.5)
                         closed_orders = self.fetch_closed_orders(symbol, limit=5)
                         for order in closed_orders:
-                            if order['id'] == order_id:
+                            if order.get('id') == order_id:
                                 return order
-                    except Exception as e:
-                        logger.debug(f"@ORDER_LOOKUP_WARN@ Closed orders lookup failed: {e}")
+                    except Exception as lookup_err:
+                        logger.debug(f"@ORDER_LOOKUP_WARN@ Closed orders lookup failed: {lookup_err}")
                 time.sleep(0.5)
-        
-        logger.warning(f"@ORDER_FALLBACK@ Order {order_id} not found, assuming closed")
-        return {'id': order_id, 'status': 'closed', 'price': None, 'filled': 0.0}
+
+        logger.warning(f"@ORDER_STATUS_UNKNOWN@ {order_id} {symbol}: {last_err}")
+        return None

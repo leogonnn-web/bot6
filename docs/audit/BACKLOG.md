@@ -62,3 +62,11 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   `deploy.bat` no longer force-pushes; SG ports 3000/9090/9092 restricted to `your_ip_cidr`
   (needs `terraform apply`).
 - [x] 2026-09-09 unread `arbitrage` section removed from `shared/config.json`.
+- [x] 2026-09-14 **Phase 1 (audit plan §6 items 5–8) + reconciled IDLE (item 9) + exit retry budget (item 10).**
+  `fetch_order`/`fetch_balance`/`fetch_ticker` return `None` instead of fabricated values;
+  `get_coin_balance`/`get_free_usdt`/`get_non_usdt_holdings` replace 5 copies of UTA parsing;
+  `TradingBot._get_fresh_price` gates every stop/target on a fresh price; `TradingBot._transition_to_idle`
+  is the only path to IDLE from BUYING/IN_POSITION/EXITING and requires the exchange to confirm the
+  coin is gone; `_resolve_buy_by_balance` / `_resolve_exit_by_balance` replace "assume filled/sold";
+  `max_exit_attempts` (default 5) halts exit retries. Tests: `tests/test_exchange_truth.py`,
+  `tests/test_state_unknown.py` (34 cases). Closes C1, C3 (main paths), C4, C5, C6; H4 partially.

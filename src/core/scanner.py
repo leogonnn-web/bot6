@@ -150,6 +150,9 @@ class MarketScanner:
         """Check BTC health - returns risk level 0-100"""
         try:
             btc_data = self.client.fetch_ticker('BTC/USDT')
+            if not btc_data:
+                logger.warning("@SCANNER_BTC_UNKNOWN@ BTC ticker unavailable, treating as elevated risk")
+                return 25
             chg_24h = float(btc_data.get('percentage') or 0)
             curr_p = float(btc_data.get('last') or 0)
 

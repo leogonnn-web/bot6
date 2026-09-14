@@ -22,13 +22,30 @@ class InPositionStateMixin:
 
             trading_config = self.config.get_trading_config()
             is_dry_run = trading_config.get('dry_run', False)
-            ws_data = self.ws_tickers_cache.get(symbol, {})
-            current_price = ws_data.get('last') or safe_float(self.exchange.fetch_ticker(symbol)['last'])
+
+            # Price must be fresh and real. A missing/stale price used to fall back to
+            # fetch_ticker()['last'] == 0.0 on error -> "-100%" -> market stop-loss.
+            price_data = self._get_fresh_price(symbol)
+            if price_data is None:
+                stale = int(self.state_data.get('price_stale_count', 0)) + 1
+                self.state_data['price_stale_count'] = stale
+                if stale == 1 or stale % 30 == 0:
+                    logger.warning(f"@PRICE_STALE@ {symbol}: no fresh price (x{stale}); stops/targets not evaluated this tick")
+                return
+            self.state_data['price_stale_count'] = 0
+            current_price = safe_float(price_data.get('last'))
 
             # Maintenance mode: emergency close position
             if getattr(self, 'maintenance_mode', False):
                 self._handle_maintenance_exit(symbol, current_price, is_dry_run)
                 return
+
+            if safe_float(self.state_data.get('buy_price')) <= 0:
+                # Entry price unknown (adopted position). PnL from here is relative to
+                # the adoption price; log loudly so the operator can correct records.
+                logger.critical(f"@ENTRY_PRICE_UNKNOWN@ {symbol}: buy_price missing, using current {current_price}")
+                self.state_data['buy_price'] = current_price
+                self.state_data.setdefault('trailing_high', current_price)
 
             change_percent = ((current_price - self.state_data['buy_price']) / self.state_data['buy_price']) * 100
             elapsed = time.time() - self.state_data['buy_time']
@@ -101,73 +118,68 @@ class InPositionStateMixin:
                     self._panic_sell(urgent=True, reason='sl')
                     return
             else:
-                # Check balance before order operations
+                # Balance check: only a CONFIRMED empty balance may end the position.
+                # None (unknown) skips the check — the old code parsed the error stub
+                # as "0 coins" and reset a live position to IDLE.
                 coin_name = symbol.split('/')[0]
-                try:
-                    balance = self.exchange.fetch_balance()
-                    uta_coins = balance.get('info', {}).get('result', {}).get('list', [{}])[0].get('coin', [])
-                    coin_balance = 0.0
-                    for c_data in uta_coins:
-                        if c_data.get('coin') == coin_name:
-                            coin_balance = safe_float(c_data.get('equity', 0))
-                            break
-                    if coin_balance <= 0.0001:
-                        logger.warning(f"[@WARNING@] Zero balance detected for {coin_name}")
-                        time.sleep(1.0)
-                        balance_retry = self.exchange.fetch_balance()
-                        uta_coins_retry = balance_retry.get('info', {}).get('result', {}).get('list', [{}])[0].get('coin', [])
-                        retry_bal = 0.0
-                        for cr_data in uta_coins_retry:
-                            if cr_data.get('coin') == coin_name:
-                                retry_bal = safe_float(cr_data.get('equity', 0))
-                                break
-                        if retry_bal <= 0.0001:
-                            logger.info(f"@RESET@ Safe reset for {symbol}")
-                            self.state_data = {}
-                            self.state = BotState.IDLE
-                            return
-                except Exception as bal_err:
-                    logger.error(f"@BALANCE_ERROR@ Balance check error for {symbol}: {bal_err}", exc_info=True)
+                coin_balance = self.exchange.get_coin_balance(coin_name)
+                if coin_balance is not None and coin_balance <= self._dust_threshold(symbol):
+                    logger.warning(f"@COIN_BALANCE_ZERO@ {coin_name}={coin_balance}, re-checking")
+                    time.sleep(1.0)
+                    retry_bal = self.exchange.get_coin_balance(coin_name)
+                    if retry_bal is not None and retry_bal <= self._dust_threshold(symbol):
+                        # Sold outside the bot (manual sale, TP filled while we were down...).
+                        self._transition_to_idle('coin_balance_zero')
+                        return
 
                 order_id = self.state_data.get('order_id')
                 order = None
+                order_unknown = False
                 if order_id:
-                    try:
-                        order = self.exchange.fetch_order(order_id, symbol)
-                    except Exception as order_err:
-                        if "last 500 orders" in str(order_err):
-                            logger.warning(f"@ORDER_ERROR@ Order history limit reached for {symbol}, resetting state")
-                            self.state_data = {}
-                            self.state = BotState.IDLE
-                            return
-                        logger.error(f"@ORDER_ERROR@ Failed to fetch order {order_id} for {symbol}: {order_err}", exc_info=True)
-                        raise order_err
+                    order = self.exchange.fetch_order(order_id, symbol)
+                    if order is None:
+                        order_unknown = True
+                        unk = int(self.state_data.get('status_unknown_count', 0)) + 1
+                        self.state_data['status_unknown_count'] = unk
+                        if unk == 1 or unk % 30 == 0:
+                            logger.warning(f"@TP_STATUS_UNKNOWN@ {symbol} order {order_id} unknown x{unk}; holding")
+                    else:
+                        self.state_data['status_unknown_count'] = 0
 
                 # A completed take-profit requires a *filled SELL* order. Guard against
                 # misreading the (already closed) BUY order as a sell — that bug caused
                 # instant exits at entry price (fee bleed).
                 if order is not None and order.get('side') == 'sell' and order.get('status') in ('closed', 'filled'):
-                    close_price = safe_float(order.get('average') or order.get('price') or self.state_data['buy_price'])
-                    trade_profit = self._calc_pnl(self.state_data['buy_price'], close_price, self.state_data['amount'])
-                    self.session_profit += trade_profit
-                    METRICS.session_profit.set(self.session_profit)
-                    self.trade_db.log_trade(symbol, "sell", self.state_data['amount'], close_price, confidence=0.0, profit=trade_profit)
-                    self._apply_dispatcher_feedback(trade_profit)
-                    tag = "PROFIT_TAKEN" if trade_profit >= 0 else "LOSS_TAKEN"
-                    logger.info(f"@{tag}@ {symbol} ${trade_profit:+.2f} @ {close_price}")
-                    self.state_data = {}
-                    self.state = BotState.IDLE
+                    if not self.state_data.get('exit_logged'):
+                        close_price = safe_float(order.get('average') or order.get('price') or self.state_data['buy_price'])
+                        sold_qty = safe_float(order.get('filled')) or self.state_data['amount']
+                        trade_profit = self._calc_pnl(self.state_data['buy_price'], close_price, sold_qty)
+                        self.session_profit += trade_profit
+                        METRICS.session_profit.set(self.session_profit)
+                        self.trade_db.log_trade(symbol, "sell", sold_qty, close_price, confidence=0.0, profit=trade_profit)
+                        self._apply_dispatcher_feedback(trade_profit)
+                        tag = "PROFIT_TAKEN" if trade_profit >= 0 else "LOSS_TAKEN"
+                        logger.info(f"@{tag}@ {symbol} ${trade_profit:+.2f} @ {close_price}")
+                        self.state_data['exit_logged'] = True
+                    # IDLE only if the exchange confirms we no longer hold the coin.
+                    self._transition_to_idle('tp_filled')
                     return
 
-                # No valid resting SELL order (TP placement failed or order_id is not a
-                # sell order): exit via market to avoid holding an unmanaged position.
-                if order is None or order.get('side') != 'sell':
+                # No resting SELL order at all (TP placement failed, or order_id points at
+                # a non-sell order): exit via limit-chase/market rather than hold unmanaged.
+                # An UNKNOWN status is not "no order" — we keep waiting, but still run the
+                # stop-loss check below against the fresh price.
+                if order_id is None or (order is not None and order.get('side') != 'sell'):
                     logger.warning(
                         f"@NO_TP_ORDER@ {symbol} has no resting sell order "
-                        f"(order_id={order_id}) -> market exit"
+                        f"(order_id={order_id}) -> exit"
                     )
                     self._panic_sell(urgent=False, reason='no_tp_order')
                     return
+                if order is not None and order.get('status') in ('canceled', 'rejected', 'expired') \
+                        and not self.state_data.get('tp_canceled_logged'):
+                    logger.warning(f"@TP_ORDER_CANCELED@ {symbol} sell {order_id} is {order.get('status')}; position has no resting TP")
+                    self.state_data['tp_canceled_logged'] = True
 
                 if is_sl_hit:
                     logger.warning(f"@STOP_LOSS_HIT@ SL hit for {symbol} ({change_percent:.2f}%)")
@@ -211,27 +223,18 @@ class InPositionStateMixin:
 
             # Use real available balance instead of saved amount to account for fees
             coin_name = symbol.split('/')[0]
-            try:
-                balance = self.exchange.fetch_balance()
-                uta_coins = balance.get('info', {}).get('result', {}).get('list', [{}])[0].get('coin', [])
-                real_balance = 0.0
-                for c_data in uta_coins:
-                    if c_data.get('coin') == coin_name:
-                        real_balance = safe_float(c_data.get('equity', 0))
-                        break
-                if real_balance > 0.0001:
-                    amount = float(self.exchange.exchange.amount_to_precision(symbol, real_balance))
-                    logger.info(f"@PANIC_REAL_BALANCE@ {coin_name} real balance: {real_balance}, sell_amount: {amount}")
-                else:
-                    # Fallback to saved amount if balance read fails
-                    amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
-                    logger.warning(f"@PANIC_BALANCE_FALLBACK@ Using saved amount: {amount}")
-            except Exception as bal_err:
-                logger.warning(f"@PANIC_BALANCE_ERROR@ Failed to fetch real balance: {bal_err}, using saved amount")
+            real_balance = None if is_dry_run else self.exchange.get_coin_balance(coin_name)
+            if real_balance is not None and real_balance > self._dust_threshold(symbol):
+                amount = float(self.exchange.exchange.amount_to_precision(symbol, real_balance))
+                logger.info(f"@PANIC_REAL_BALANCE@ {coin_name} real balance: {real_balance}, sell_amount: {amount}")
+            else:
+                # Balance unknown (None) or dry-run: fall back to the saved amount
                 amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
+                if not is_dry_run:
+                    logger.warning(f"@PANIC_BALANCE_FALLBACK@ {coin_name} balance={real_balance}; using saved amount: {amount}")
 
-            # Live market snapshot
-            ws = self.ws_tickers_cache.get(symbol, {})
+            # Live market snapshot (fresh only; stale bid/ask must not price the exit)
+            ws = self._get_fresh_price(symbol) or {}
             best_bid = safe_float(ws.get('bid'))
             best_ask = safe_float(ws.get('ask'))
             cur_price = best_bid or best_ask or buy_price
@@ -393,15 +396,16 @@ class InPositionStateMixin:
                     if not is_dry_run and self.state_data.get('maintenance_order_id'):
                         try:
                             order = self.exchange.fetch_order(self.state_data['maintenance_order_id'], symbol)
-                            if order['status'] in ['closed', 'filled']:
-                                close_price = safe_float(order.get('price') or order.get('average', buy_price))
-                                trade_profit = self._calc_pnl(buy_price, close_price, amount)
-                                self.session_profit += trade_profit
-                                METRICS.session_profit.set(self.session_profit)
-                                self.trade_db.log_trade(symbol, "sell", amount, close_price, confidence=0.0, profit=trade_profit)
-                                logger.info(f"@MAINTENANCE_CLOSE@ Limit sell filled @ {close_price}")
-                                self.state_data = {}
-                                self.state = BotState.IDLE
+                            if order is not None and order.get('status') in ['closed', 'filled']:
+                                if not self.state_data.get('exit_logged'):
+                                    close_price = safe_float(order.get('average') or order.get('price') or buy_price)
+                                    trade_profit = self._calc_pnl(buy_price, close_price, amount)
+                                    self.session_profit += trade_profit
+                                    METRICS.session_profit.set(self.session_profit)
+                                    self.trade_db.log_trade(symbol, "sell", amount, close_price, confidence=0.0, profit=trade_profit)
+                                    logger.info(f"@MAINTENANCE_CLOSE@ Limit sell filled @ {close_price}")
+                                    self.state_data['exit_logged'] = True
+                                self._transition_to_idle('maintenance_limit_filled')
                                 return
                         except Exception as e:
                             logger.debug(f"@MAINTENANCE_CHECK_WARN@ {e}")
@@ -428,6 +432,5 @@ class InPositionStateMixin:
                 self._panic_sell()
         except Exception as e:
             logger.error(f"@MAINTENANCE_ERROR@ Maintenance exit failed: {e}")
-            # Last resort: reset state
-            self.state_data = {}
-            self.state = BotState.IDLE
+            # Last resort: IDLE only if the exchange confirms the coin is gone.
+            self._transition_to_idle('maintenance_error')

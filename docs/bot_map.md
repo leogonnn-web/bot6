@@ -144,7 +144,7 @@ else:              mode = 'conservative'    # чаще всего
 - `corr_low` — корреляция < 0.5
 
 **Жёсткие отказы (не кэшируются):**
-- OHLCV fetch failed, analyzer error, BTC trend failed, tank_block
+- OHLCV fetch failed, analyzer error, BTC trend failed
 
 **Retry:** через 45с тот же символ проверяется снова. Если score вырос — `@SECOND_CHANCE@`.
 

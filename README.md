@@ -277,7 +277,6 @@ triada/
 BYBIT_API_KEY=xxx
 BYBIT_API_SECRET=xxx
 LOG_LEVEL=INFO
-TANK_MODE=false   # Legacy; now controlled via config.json trading.tank_mode
 ```
 
 ---

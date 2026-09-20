@@ -37,25 +37,10 @@ def main() -> int:
         raise
 
     # ------------------------------------------------------------------
-    # Step 2: resolve tank_mode (env wins, then config.json)
-    # ------------------------------------------------------------------
-    tank_mode_env = os.getenv('TANK_MODE', '').lower()
-    if tank_mode_env == 'true':
-        tank_mode = True
-    elif tank_mode_env == 'false':
-        tank_mode = False
-    else:
-        try:
-            tank_mode = bool(config.get_trading_config().get('tank_mode', False))
-        except Exception as e:
-            print(f"[WARN] could not read tank_mode from config: {e}", file=sys.stderr)
-            tank_mode = False
-
-    # ------------------------------------------------------------------
-    # Step 3: start the bot
+    # Step 2: start the bot
     # ------------------------------------------------------------------
     from core.bot import TradingBot
-    bot = TradingBot(tank_mode=tank_mode)
+    bot = TradingBot()
     bot.run()
     return 0
 

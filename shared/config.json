@@ -17,7 +17,6 @@
     "atr_period": 14,
     "min_stop_pct": 1.0,
     "take_profit": 1.5,
-    "tank_mode": false,
     "min_confidence_threshold": 35.0,
     "min_rvol_threshold": 1.2,
     "shallow_drop_threshold": 0.75,

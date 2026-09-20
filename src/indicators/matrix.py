@@ -507,7 +507,7 @@ class SignalOptimizer:
     """Signal aggregation and conflict resolution"""
     
     @classmethod
-    def from_config(cls, config_dict: dict, market_config: dict = None, tank_mode: bool = False):
+    def from_config(cls, config_dict: dict, market_config: dict = None):
         signal_weights = config_dict.get('signal_weights', {})
         min_confidence = config_dict.get('min_confidence_threshold', 50.0)
         strong_buy = config_dict.get('strong_buy_threshold', None)
@@ -519,8 +519,7 @@ class SignalOptimizer:
             min_confidence_threshold=min_confidence,
             strong_buy_threshold=strong_buy,
             use_conflict_detection=use_conflict,
-            volatility_adjusted=volatility_adj,
-            tank_mode=tank_mode
+            volatility_adjusted=volatility_adj
         )
     
     def __init__(
@@ -529,8 +528,7 @@ class SignalOptimizer:
         min_confidence_threshold: float = 50.0,
         strong_buy_threshold: Optional[float] = None,
         use_conflict_detection: bool = True,
-        volatility_adjusted: bool = True,
-        tank_mode: bool = False
+        volatility_adjusted: bool = True
     ):
         default_weights = {
             'rsi': 2.0,
@@ -545,7 +543,6 @@ class SignalOptimizer:
         self.strong_buy_threshold = float(strong_buy_threshold) if strong_buy_threshold else max(35.0, self.min_confidence_threshold + 15.0)
         self.use_conflict_detection = use_conflict_detection
         self.volatility_adjusted = volatility_adjusted
-        self.tank_mode = tank_mode
         self.max_possible_score = sum(self.signal_weights.values())
     
     def aggregate_signals(
@@ -563,34 +560,6 @@ class SignalOptimizer:
             score = 0.0
             signals_fired = []
             conflicts = []
-            
-            # TANK MODE: Hard block on Downtrend
-            if self.tank_mode:
-                # Block LONG if Ichimoku shows Downtrend
-                if ichimoku_signal:
-                    if not ichimoku_signal.get('cloud_bullish') or not ichimoku_signal.get('price_above_cloud'):
-                        return {
-                            'recommendation': 'SKIP',
-                            'confidence': 0.0,
-                            'score': 0.0,
-                            'max_score': float(self.max_possible_score),
-                            'signals_fired': [],
-                            'conflicts': ['Ichimoku Downtrend - TANK MODE BLOCK'],
-                            'tank_block_reason': 'Ichimoku Downtrend'
-                        }
-                
-                # Block LONG if EMA shows Downtrend
-                ema_alignment = rsi_signal.get('ema_alignment', 0)
-                if ema_alignment <= -1:
-                    return {
-                        'recommendation': 'SKIP',
-                        'confidence': 0.0,
-                        'score': 0.0,
-                        'max_score': float(self.max_possible_score),
-                        'signals_fired': [],
-                        'conflicts': ['EMA Downtrend - TANK MODE BLOCK'],
-                        'tank_block_reason': 'EMA Downtrend'
-                    }
             
             # RSI
             if rsi_signal.get('oversold'):
@@ -650,22 +619,9 @@ class SignalOptimizer:
                     score += 1.0
                     signals_fired.append("Price near volume support")
             
-            # TANK MODE: Hard conflict detection
-            if self.tank_mode:
-                if len(conflicts) >= 1:
-                    return {
-                        'recommendation': 'SKIP',
-                        'confidence': 0.0,
-                        'score': 0.0,
-                        'max_score': float(self.max_possible_score),
-                        'signals_fired': signals_fired,
-                        'conflicts': conflicts,
-                        'tank_block_reason': f'Conflict detected: {conflicts[0]}'
-                    }
-            else:
-                # Normal mode (Hydra scalp: allow more conflicts)
-                if self.use_conflict_detection and len(conflicts) >= 3:
-                    score *= 0.85
+            # Normal mode (Hydra scalp: allow more conflicts)
+            if self.use_conflict_detection and len(conflicts) >= 3:
+                score *= 0.85
             
             # Volatility adjustment (Hydra: shitcoins are always volatile)
             if self.volatility_adjusted and volatility_level > 3.0:
@@ -674,21 +630,12 @@ class SignalOptimizer:
             confidence = (score / self.max_possible_score) * 100
             confidence = max(0, min(100, confidence))
             
-            # TANK MODE: 85% threshold for STRONG_BUY
-            if self.tank_mode:
-                if confidence >= 85.0:
-                    recommendation = "STRONG_BUY"
-                elif confidence >= 75.0:
-                    recommendation = "BUY"
-                else:
-                    recommendation = "SKIP"
+            if confidence >= self.strong_buy_threshold:
+                recommendation = "STRONG_BUY"
+            elif confidence >= self.min_confidence_threshold:
+                recommendation = "BUY"
             else:
-                if confidence >= self.strong_buy_threshold:
-                    recommendation = "STRONG_BUY"
-                elif confidence >= self.min_confidence_threshold:
-                    recommendation = "BUY"
-                else:
-                    recommendation = "SKIP"
+                recommendation = "SKIP"
             
             return {
                 'recommendation': recommendation,
@@ -999,19 +946,19 @@ class IndicatorMatrix:
 # Will be initialized with config if available, otherwise uses defaults
 analyzer = None
 
-def initialize_analyzer(config=None, tank_mode=False):
+def initialize_analyzer(config=None):
     """Initialize analyzer with config if provided"""
     global analyzer
     if config is not None:
         try:
             signal_optimizer_config = config.get_signal_optimizer_config()
             market_conditions_config = config.get_market_conditions_config()
-            optimizer = SignalOptimizer.from_config(signal_optimizer_config, market_conditions_config, tank_mode=tank_mode)
+            optimizer = SignalOptimizer.from_config(signal_optimizer_config, market_conditions_config)
             analyzer = IndicatorMatrix(optimizer=optimizer)
-            logger.info(f"@INDICATORS_INIT@ Analyzer initialized with config (TANK MODE: {tank_mode})")
+            logger.info("@INDICATORS_INIT@ Analyzer initialized with config")
         except Exception as e:
             logger.warning(f"@INDICATORS_WARN@ Failed to init with config: {e}, using defaults")
-            analyzer = IndicatorMatrix(optimizer=SignalOptimizer(tank_mode=tank_mode))
+            analyzer = IndicatorMatrix(optimizer=SignalOptimizer())
     else:
-        analyzer = IndicatorMatrix(optimizer=SignalOptimizer(tank_mode=tank_mode))
+        analyzer = IndicatorMatrix(optimizer=SignalOptimizer())
     return analyzer

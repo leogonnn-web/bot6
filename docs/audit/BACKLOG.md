@@ -7,7 +7,7 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 
 ## Dead / duplicate code (remove in Phase 6 after live logic is stabilised)
 
-- [ ] B-01 **Tank mode: remove (decision "б", 2026-09-09).** `tank_mode` flag is read from two
+- [x] B-01 **Tank mode: remove (decision "б", 2026-09-09).** `tank_mode` flag is read from two
   unsynchronised sources (`main.py:42-52` → `initialize_analyzer` at startup vs
   `trading_config.get('tank_mode')` per tick in `scanning.py:484`), so env/config disagreement yields a
   half-mode. Semantically it contradicts Hydra's knife-catch entry (requires bullish Ichimoku/EMA,
@@ -16,17 +16,20 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   (`slot_size`, `max_grid_levels=1`, `min_confidence_threshold`, `min_rvol_threshold`).
   Touch points: `main.py:39-52`, `bot.py:72-86`, `scanning.py:86-88,209-259,484-522`,
   `matrix.py:510-548,567-593,653-664,677-684,1002-1016`, `config.json:20`, `README.md §5.2`.
+  Done 2026-09-21 (TZ-06): all touch points removed; "cautious live" preset not added.
 - [x] B-02 Second definition of `_handle_scanning_state` (`scanning.py:16`) and the whole legacy
   `_scan_for_entries` (`scanning.py:21-357`) are dead — the later definition at `:605` wins.
   Done 2026-09-14: both removed; `@SCAN_NO_QUEUE@` fallback now goes IDLE (queue scan is the only path).
 - [x] B-03 `_fix_executed_grid_deal` (`hydra_net.py:308-407`) is never called and has a `NameError`
   (`trading_config` undefined at `:364`). Done 2026-09-14: removed; no imports became unused.
-- [ ] B-04 `shared/database.py` duplicates `src/database/models.py` with an older schema; kept alive only
-  by the `sys.path` ordering hack in `main.py:9-13`.
-- [ ] B-05 `shared/exchange_utils.py` — unreferenced exchange client with live order methods and the same
-  synthetic `fetch_order` fallback (`:213-214`).
-- [ ] B-06 `shared/utils.py:116-212` — `ProfitManager`, `HealthChecker`, `SoundNotifier` unused;
-  `paths.py:12-13` `V17_CONFIG`, `SESSION_PROFIT_FILE` unused.
+- [x] B-04 `shared/database.py` duplicates `src/database/models.py` with an older schema; kept alive only
+  by the `sys.path` ordering hack in `main.py:9-13`. Done 2026-09-21 (TZ-06): file deleted; `trade_logger.py`
+  `from database import TradeDatabase` resolves to `src/database` package.
+- [x] B-05 `shared/exchange_utils.py` — unreferenced exchange client with live order methods and the same
+  synthetic `fetch_order` fallback (`:213-214`). Done 2026-09-21 (TZ-06): file deleted.
+- [x] B-06 `shared/utils.py:116-212` — `ProfitManager`, `HealthChecker`, `SoundNotifier` unused;
+  `paths.py:12-13` `V17_CONFIG`, `SESSION_PROFIT_FILE` unused. Done 2026-09-21 (TZ-06): classes +
+  `get_session_profit` removed with now-unused imports (`json`, `os`, `time`, `logger`, `paths`).
 - [ ] B-07 `archive/scanner_legacy.py`, root-level `analyze_entry.py`, `compare_metrics.py`,
   `compare_logs.ps1`, `daily_report.csv`, `trades.db` (root copy), `HYDRA_MATH_ANALYSIS.md`,
   `TRADING_TEST_RESULTS.md`, `roadmap.md` — decide keep/move to `docs/` or `scripts/`.

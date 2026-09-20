@@ -69,10 +69,9 @@ class TradingBot(
     drives the state machine via the run loop. Per-state logic lives in mixins.
     """
 
-    def __init__(self, tank_mode: bool = False):
+    def __init__(self):
         logger.info("@INIT@ Initializing HYDRA v17.0 (WebSockets)...")
         self.config = config
-        self.tank_mode = tank_mode
 
         # Fail-fast: validate config before anything else
         try:
@@ -82,8 +81,8 @@ class TradingBot(
             logger.critical(f"@CONFIG_FATAL@ Invalid config — cannot start:\n{e}")
             raise SystemExit(1) from e
 
-        # Initialize analyzer with config and tank_mode
-        initialize_analyzer(self.config, tank_mode=tank_mode)
+        # Initialize analyzer with config
+        initialize_analyzer(self.config)
 
         self.exchange = BybitClient()
         self.trade_db = TradeDatabase()

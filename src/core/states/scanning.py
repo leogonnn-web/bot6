@@ -138,10 +138,6 @@ class ScanningStateMixin:
                     logger.info(f"@RVOL_FALLBACK@ {symbol} synthetic RVOL={real_rvol:.2f}x (proxy=${proxy:,.0f}, avg_15s=${avg_15s:,.0f})")
         trading_config = self.config.get_trading_config()
         min_rvol = trading_config.get('min_rvol_threshold', 1.5)
-        tank_mode = trading_config.get('tank_mode', False)
-        if tank_mode and real_rvol < 2.0:
-            logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: tank_mode RVOL={real_rvol:.2f}x < 2.0")
-            return None
         if real_rvol < min_rvol:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: RVOL={real_rvol:.2f}x < {min_rvol}x")
             self._add_to_rejected_cache(candidate, "rvol_low")
@@ -167,16 +163,8 @@ class ScanningStateMixin:
             except Exception as e:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: analyzer exception: {e}")
                 return None
-            if tank_mode and 'tank_block_reason' in analysis:
-                logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: tank_block={analysis.get('tank_block_reason')}")
-                return None
             base_threshold = trading_config.get('min_confidence_threshold', 60.0)
             base_threshold = max(base_threshold, 20.0)
-            if tank_mode:
-                base_threshold = 85.0
-                if btc_trend == "bearish":
-                    logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: tank_mode bearish btc")
-                    return None
             if analysis['recommendation'] not in ['STRONG_BUY', 'BUY']:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: rec={analysis['recommendation']}")
                 return None

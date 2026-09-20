@@ -14,6 +14,45 @@ for p in (SRC, SHARED):
 
 
 # ---------------------------------------------------------------------------
+# .env isolation: tests must never see real exchange credentials.
+# shared/config.py binds `load_dotenv` at import time and calls it in
+# Config.__init__ (including the module-level `config = Config()`). conftest
+# is imported before any test module, so stubbing it here guarantees the
+# local .env file is never loaded into os.environ during the test session.
+# ---------------------------------------------------------------------------
+def _load_dotenv_stub(*args, **kwargs):
+    return False
+
+try:
+    import dotenv
+    dotenv.load_dotenv = _load_dotenv_stub
+except ImportError:
+    pass
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _isolate_env_from_dotenv():
+    """Purge exchange credentials from os.environ for the whole test session.
+
+    Covers keys present in the real shell environment and anything that may
+    have been loaded before the load_dotenv stub above took effect.
+    """
+    # If shared/config.py was somehow imported before this conftest, it holds
+    # a real `load_dotenv` binding — replace it so late Config() instantiations
+    # cannot re-populate os.environ from the local .env file.
+    config_mod = sys.modules.get('config')
+    if config_mod is not None:
+        config_mod.load_dotenv = _load_dotenv_stub
+
+    saved = {}
+    for key in list(os.environ):
+        if key.endswith(('_API_KEY', '_API_SECRET')) or key in ('HEALTHCHECK_URL', 'GRAFANA_PASSWORD'):
+            saved[key] = os.environ.pop(key)
+    yield
+    os.environ.update(saved)
+
+
+# ---------------------------------------------------------------------------
 # Minimal valid config dicts (mirrors shared/config.json structure)
 # ---------------------------------------------------------------------------
 VALID_TRADING = {

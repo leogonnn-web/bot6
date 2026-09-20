@@ -16,10 +16,11 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   (`slot_size`, `max_grid_levels=1`, `min_confidence_threshold`, `min_rvol_threshold`).
   Touch points: `main.py:39-52`, `bot.py:72-86`, `scanning.py:86-88,209-259,484-522`,
   `matrix.py:510-548,567-593,653-664,677-684,1002-1016`, `config.json:20`, `README.md §5.2`.
-- [ ] B-02 Second definition of `_handle_scanning_state` (`scanning.py:16`) and the whole legacy
+- [x] B-02 Second definition of `_handle_scanning_state` (`scanning.py:16`) and the whole legacy
   `_scan_for_entries` (`scanning.py:21-357`) are dead — the later definition at `:605` wins.
-- [ ] B-03 `_fix_executed_grid_deal` (`hydra_net.py:308-407`) is never called and has a `NameError`
-  (`trading_config` undefined at `:364`).
+  Done 2026-09-14: both removed; `@SCAN_NO_QUEUE@` fallback now goes IDLE (queue scan is the only path).
+- [x] B-03 `_fix_executed_grid_deal` (`hydra_net.py:308-407`) is never called and has a `NameError`
+  (`trading_config` undefined at `:364`). Done 2026-09-14: removed; no imports became unused.
 - [ ] B-04 `shared/database.py` duplicates `src/database/models.py` with an older schema; kept alive only
   by the `sys.path` ordering hack in `main.py:9-13`.
 - [ ] B-05 `shared/exchange_utils.py` — unreferenced exchange client with live order methods and the same

@@ -86,8 +86,9 @@ services:
       - PROMETHEUS_URL=http://prometheus:9090
       - TARGET_CONTAINER=hydra-bot
       - POLL_INTERVAL_SEC=5
-      - STALL_THRESHOLD_SEC=15
+      - STALL_THRESHOLD_SEC=60
       - RESTART_COOLDOWN_SEC=60
+      - RESTART_TIMEOUT_SEC=20
       - LOG_LEVEL=INFO
       - PAUSE_FILE_PATH=/data/watchdog.pause
     volumes:

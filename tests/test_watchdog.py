@@ -47,6 +47,7 @@ class FakeController:
         self.restart_calls: List[tuple] = []
         self.raise_on_restart: Optional[Exception] = None
         self.status_value = status
+        self.status_calls = 0
 
     def restart(self, name: str, timeout: int) -> None:
         if self.raise_on_restart:
@@ -54,6 +55,7 @@ class FakeController:
         self.restart_calls.append((name, timeout))
 
     def status(self, name: str) -> str:
+        self.status_calls += 1
         return self.status_value
 
 
@@ -173,7 +175,11 @@ def test_cooldown_blocks_double_restart():
 
 
 def test_restart_failure_does_not_reset_state():
-    """If docker restart raises, state is NOT reset — issue retries next tick."""
+    """If docker restart raises, stall trackers are NOT reset — retry stays armed.
+
+    The cooldown is armed (see test_restart_failure_arms_cooldown) so the retry
+    is deferred rather than hammered, but the reason for restarting is kept.
+    """
     wd, prom, ctrl = _make_watchdog({
         "hydra_health_status": [0.0],
         "hydra_heartbeat_timestamp": [0.0],
@@ -186,6 +192,34 @@ def test_restart_failure_does_not_reset_state():
     assert ctrl.restart_calls == []
     # health_bad_since still set → retry possible on next tick once docker recovers
     assert wd.state.health_bad_since is not None
+
+
+def test_restart_failure_arms_cooldown():
+    """A failing docker restart must not be retried on every 5s poll.
+
+    Before the fix, an exception from controller.restart() left last_restart_ts
+    at 0, so each tick re-entered the restart path against a broken daemon.
+    """
+    wd, prom, ctrl = _make_watchdog({
+        "hydra_health_status": [0.0],
+        "hydra_heartbeat_timestamp": [0.0],
+    }, stall=15.0, cooldown=60.0)
+    ctrl.raise_on_restart = RuntimeError("docker daemon down")
+
+    wd.tick(now=0.0)                            # arms health_bad_since
+    assert wd.tick(now=20.0) is False           # attempt → raises
+    assert wd.state.last_restart_ts == 20.0     # cooldown armed
+
+    # Next poll 5s later must be short-circuited by the cooldown, before the
+    # controller is consulted at all
+    calls_before = ctrl.status_calls
+    assert wd.tick(now=25.0) is False
+    assert ctrl.status_calls == calls_before
+
+    # Once the cooldown expires the attempt is made again
+    ctrl.raise_on_restart = None
+    assert wd.tick(now=81.0) is True
+    assert ctrl.restart_calls == [("hydra-bot", 2)]
 
 
 def test_heartbeat_reset_on_bot_restart_does_not_trigger():
@@ -243,16 +277,12 @@ def test_prometheus_unreachable_does_not_crash():
     assert ctrl.restart_calls == []
 
 
-def test_target_down_triggers_restart():
-    """When the bot disappears from Prometheus (e.g. `docker stop`), watchdog
-    must detect target unreachable and restart after stall_threshold_sec.
+def test_target_down_does_not_trigger_restart():
+    """Target gone from Prometheus must NOT by itself trigger a restart.
 
-    Regression for the prod test where `docker stop hydra-bot` did not fire
-    a restart because both metric queries returned empty result sets.
-
-    NOTE: This test is now obsolete with Variant 3 (status check). Container
-    status check prevents restart when container is 'exited'. This test
-    documents the old behavior for reference.
+    With the container status check (Variant 3), a target that vanished from
+    Prometheus while the container is not 'running' was stopped on purpose —
+    the watchdog must not resurrect it.
     """
     wd, prom, ctrl = _make_watchdog({
         "hydra_health_status": [None],

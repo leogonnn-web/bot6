@@ -1,10 +1,10 @@
 """pytest suite for HealthChecker — mimics Bybit network timeout scenarios"""
 import time
-import signal
 import pytest
 from unittest.mock import MagicMock, patch
 
 from core.health import HealthChecker
+from core.state_enum import BotState
 
 
 class DummyBot:
@@ -12,7 +12,7 @@ class DummyBot:
     def __init__(self):
         self.ws_tickers_cache = {}
         self.last_rest_poll_time = time.time()
-        self.state = 'IDLE'
+        self.state = BotState.IDLE
         self.state_entry_time = time.time()
         self.balance = 1000.0
         self.config = MagicMock()
@@ -80,7 +80,7 @@ def test_database_persistent_failure():
 
 def test_state_stuck_buying():
     bot = DummyBot()
-    bot.state = 'BUYING'
+    bot.state = BotState.BUYING
     bot.state_entry_time = time.time() - 400  # 400s > 300s limit
     hc = HealthChecker(bot)
     assert hc._check_state_stuck() is False
@@ -88,8 +88,26 @@ def test_state_stuck_buying():
 
 def test_state_not_stuck_scanning():
     bot = DummyBot()
-    bot.state = 'SCANNING'
+    bot.state = BotState.SCANNING
     bot.state_entry_time = time.time() - 400
+    hc = HealthChecker(bot)
+    assert hc._check_state_stuck() is True
+
+
+def test_state_stuck_buying_just_over_limit():
+    """Enum comparison must actually fire: BUYING for 301s > 300s limit."""
+    bot = DummyBot()
+    bot.state = BotState.BUYING
+    bot.state_entry_time = time.time() - 301
+    hc = HealthChecker(bot)
+    assert hc._check_state_stuck() is False
+
+
+def test_state_idle_never_stuck():
+    """IDLE is not a supervised state — any age is fine."""
+    bot = DummyBot()
+    bot.state = BotState.IDLE
+    bot.state_entry_time = time.time() - 99999
     hc = HealthChecker(bot)
     assert hc._check_state_stuck() is True
 
@@ -139,8 +157,12 @@ def test_bybit_timeout_scenario():
     assert report['overall'] is False
 
 
-def test_watchdog_sigterm_on_3_consecutive():
-    """Verify SIGTERM is sent after 3 consecutive failures."""
+def test_no_self_sigterm_on_consecutive_fails():
+    """Restart is owned by the external watchdog — health must never self-kill.
+
+    Two supervisors racing on the same process is audit H2/H3: the bot sent
+    itself SIGTERM while the watchdog was also restarting the container.
+    """
     bot = DummyBot()
     bot.last_rest_poll_time = time.time() - 120
 
@@ -150,9 +172,23 @@ def test_watchdog_sigterm_on_3_consecutive():
 
     with patch('os.kill') as mock_kill:
         hc.check()  # fail 1
+        hc.check()  # fail 2 — crosses max_consecutive_fails
+        hc.check()  # fail 3
         assert mock_kill.call_count == 0
-        hc.check()  # fail 2
-        assert mock_kill.call_count == 1
-        # Verify SIGTERM signal
-        args, _ = mock_kill.call_args
-        assert args[1] == signal.SIGTERM
+    assert hc.consecutive_fails >= hc.max_consecutive_fails
+
+
+def test_degraded_reports_zero_health_gauge():
+    """Crossing max_consecutive_fails must drive health_status to 0."""
+    bot = DummyBot()
+    bot.last_rest_poll_time = time.time() - 120
+
+    hc = HealthChecker(bot)
+    hc.max_consecutive_fails = 2
+    hc.check_interval = 0
+
+    with patch('core.health.METRICS') as mock_metrics:
+        hc.check()  # fail 1 — hysteresis holds the gauge at 1
+        mock_metrics.health_status.set.assert_called_with(1.0)
+        hc.check()  # fail 2 — degraded
+        mock_metrics.health_status.set.assert_called_with(0.0)

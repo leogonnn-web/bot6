@@ -25,9 +25,9 @@ Environment variables (optional, sane defaults provided):
   PROMETHEUS_URL          default: http://prometheus:9090
   TARGET_CONTAINER        default: hydra-bot
   POLL_INTERVAL_SEC       default: 5
-  STALL_THRESHOLD_SEC     default: 25
+  STALL_THRESHOLD_SEC     default: 60
   RESTART_COOLDOWN_SEC    default: 60
-  RESTART_TIMEOUT_SEC     default: 2
+  RESTART_TIMEOUT_SEC     default: 20
 """
 
 from __future__ import annotations
@@ -53,9 +53,9 @@ class WatchdogConfig:
     prometheus_url: str = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
     target_container: str = os.getenv("TARGET_CONTAINER", "hydra-bot")
     poll_interval_sec: float = float(os.getenv("POLL_INTERVAL_SEC", "5"))
-    stall_threshold_sec: float = float(os.getenv("STALL_THRESHOLD_SEC", "25"))
+    stall_threshold_sec: float = float(os.getenv("STALL_THRESHOLD_SEC", "60"))
     restart_cooldown_sec: float = float(os.getenv("RESTART_COOLDOWN_SEC", "60"))
-    restart_timeout_sec: int = int(os.getenv("RESTART_TIMEOUT_SEC", "2"))
+    restart_timeout_sec: int = int(os.getenv("RESTART_TIMEOUT_SEC", "20"))
     request_timeout_sec: float = float(os.getenv("PROM_REQUEST_TIMEOUT_SEC", "3"))
     # Grace period after watchdog start AND after each restart, during which
     # NO restart can be issued. Protects against false freezes while the bot
@@ -279,6 +279,11 @@ class Watchdog:
                     self.cfg.target_container, self.cfg.restart_timeout_sec
                 )
             except Exception as e:
+                # Arm the cooldown even though nothing was restarted: without
+                # it every poll (5s) would retry against a broken docker
+                # daemon. Stall trackers are deliberately NOT reset, so the
+                # retry fires as soon as the cooldown expires.
+                self.state.last_restart_ts = now
                 logger.error("@WATCHDOG_RESTART_FAIL@ %s", e)
                 return False
 

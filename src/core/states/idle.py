@@ -11,6 +11,13 @@ from ..state_enum import BotState
 
 class IdleStateMixin:
     def _handle_idle_state(self):
+        # Non-blocking re-check gate: sleeping here would stall the main loop
+        # (and its heartbeat) for 5s, which the external watchdog reads as a
+        # freeze. Instead we return immediately and retry after the deadline.
+        now = time.time()
+        if now < getattr(self, '_idle_next_check_ts', 0.0):
+            return
+
         risk_ok = self._check_risk_limits()
         time_ok = self._check_time_session()
         balance_ok = self._check_balance()
@@ -23,8 +30,9 @@ class IdleStateMixin:
             logger.info("@IDLE@ Balance check failed")
 
         if not risk_ok or not time_ok or not balance_ok:
-            time.sleep(5)
+            self._idle_next_check_ts = now + 5
             return
 
+        self._idle_next_check_ts = 0.0
         logger.info("@IDLE@ All checks passed, transitioning to SCANNING")
         self.state = BotState.SCANNING

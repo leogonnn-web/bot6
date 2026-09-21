@@ -10,6 +10,7 @@ from typing import Dict, List
 # that wipes the other's collectors from REGISTRY on import — which silently
 # disables every metric except those owned by whichever import ran last.
 from metrics import METRICS
+from core.state_enum import BotState
 
 logger = logging.getLogger('HYDRA')
 
@@ -65,10 +66,11 @@ class HealthChecker:
 
             if self.consecutive_fails >= self.max_consecutive_fails:
                 logger.critical(
-                    f"@HEALTH_CRITICAL@ {self.max_consecutive_fails} consecutive failures! "
-                    f"Triggering SIGTERM for Docker restart."
+                    f"@HEALTH_CRITICAL@ {self.consecutive_fails} consecutive failures "
+                    f"(threshold {self.max_consecutive_fails}). Reporting degraded health; "
+                    f"restart is owned by the external watchdog."
                 )
-                self._trigger_watchdog_restart()
+                METRICS.health_status.set(0.0)
         else:
             if self.consecutive_fails > 0:
                 logger.info(f"@HEALTH_OK@ Restored after {self.consecutive_fails} failures")
@@ -77,7 +79,7 @@ class HealthChecker:
         # Hysteresis: hold the Prometheus gauge at 1 on a single transient
         # failure to avoid waking up the external watchdog on a single missed
         # tick. Only flip to 0 once we have at least 2 failures in a row,
-        # which then matches the watchdog's stall window (>=15s).
+        # which then matches the watchdog's stall window (>=60s).
         gauge_val = 1.0 if (report['overall'] or self.consecutive_fails < 2) else 0.0
         METRICS.health_status.set(gauge_val)
 
@@ -131,9 +133,13 @@ class HealthChecker:
     def _check_state_stuck(self) -> bool:
         state = getattr(self.bot, 'state', None)
         state_entry = getattr(self.bot, 'state_entry_time', 0)
-        if state in ['IN_POSITION', 'BUYING', 'EXITING']:
+        if state in (BotState.IN_POSITION, BotState.BUYING, BotState.EXITING):
             elapsed = time.time() - state_entry
-            max_time = {'BUYING': 300, 'IN_POSITION': 3600, 'EXITING': 300}.get(state, 600)
+            max_time = {
+                BotState.BUYING: 300,
+                BotState.IN_POSITION: 3600,
+                BotState.EXITING: 300,
+            }.get(state, 600)
             if elapsed > max_time:
                 logger.debug(f"Health: state {state} stuck for {elapsed:.0f}s")
                 return False
@@ -158,7 +164,12 @@ class HealthChecker:
     # Watchdog: SIGTERM → Docker restart: unless-stopped
     # ------------------------------------------------------------------
     def _trigger_watchdog_restart(self):
-        """Force process exit so Docker policy triggers container restart."""
+        """Force process exit so Docker policy triggers container restart.
+
+        NOT called by `check()`: restart is owned by the external watchdog
+        (`src/monitoring/watchdog.py`). Two supervisors racing on the same
+        process caused SIGKILL of a healthy bot. Kept for manual/operator use.
+        """
         try:
             os.kill(os.getpid(), signal.SIGTERM)
         except Exception as e:

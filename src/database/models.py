@@ -5,8 +5,7 @@ SQLite database for trade logging and statistics
 
 import sqlite3
 import time
-from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import sys
 import os
 
@@ -177,8 +176,17 @@ class TradeDatabase:
 
     def get_session_stats(self, since_ts: float = 0) -> Dict:
         """
-        Calculate session PnL and statistics from trades.db
-        Uses FIFO matching for buy/sell pairs per symbol.
+        Calculate session PnL and statistics from trades.db.
+
+        Single source of truth: the `profit` column written by log_trade(), which
+        is net of fees (see _calc_pnl). The previous FIFO re-derivation of
+        `(price - buy_price) * matched` ignored that column and produced GROSS
+        profit, so the risk capital lock (limits.py) systematically understated
+        losses.
+
+        Partial take-profits (`sell_partial`) contribute to session_profit but
+        are NOT counted as trades — they are legs of one position, not separate
+        deals. `total_trades` therefore counts only closing sells.
 
         since_ts > 0 restricts the calculation to trades on/after that epoch,
         used to scope the real-money session so prior dry-run PnL is excluded.
@@ -187,51 +195,26 @@ class TradeDatabase:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'SELECT symbol, side, amount, price FROM trades '
-                'WHERE timestamp >= ? ORDER BY timestamp ASC',
+                "SELECT side, profit FROM trades "
+                "WHERE timestamp >= ? AND side LIKE 'sell%'",
                 (since_ts,)
             )
             rows = cursor.fetchall()
             conn.close()
-            
-            open_buys: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
+
+            closing_sides = ('sell', 'sell_panic')
             total_trades = 0
             winning_trades = 0
             session_profit = 0.0
-            
-            for symbol, side, amount, price in rows:
-                amount = float(amount)
-                price = float(price)
-                
-                if side == 'buy':
-                    open_buys[symbol].append((amount, price))
-                elif side == 'buy_grid_complete':
-                    # Skip duplicate already tracked by 'buy' entry
-                    continue
-                elif side.startswith('sell') and open_buys[symbol]:
-                    if side == 'sell_partial':
-                        # Reduce open position without counting profit
-                        buy_amount, buy_price = open_buys[symbol][0]
-                        matched = min(amount, buy_amount)
-                        remainder = buy_amount - matched
-                        if remainder > 0:
-                            open_buys[symbol][0] = (remainder, buy_price)
-                        else:
-                            open_buys[symbol].pop(0)
-                        continue
-                    
-                    # sell / sell_panic: match FIFO and count profit
-                    buy_amount, buy_price = open_buys[symbol].pop(0)
-                    matched = min(amount, buy_amount)
-                    profit = (price - buy_price) * matched
-                    session_profit += profit
+
+            for side, profit in rows:
+                profit = float(profit or 0.0)
+                session_profit += profit
+                if side in closing_sides:
                     total_trades += 1
                     if profit > 0:
                         winning_trades += 1
-                    remainder = buy_amount - matched
-                    if remainder > 0:
-                        open_buys[symbol].insert(0, (remainder, buy_price))
-            
+
             win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
             
             return {
@@ -253,7 +236,12 @@ class TradeDatabase:
 
     def get_daily_trades_count(self, since_ts: float = 0) -> int:
         """
-        Count trades made today (UTC date).
+        Count completed trades made today (UTC date).
+
+        Only closing sells (`sell`, `sell_panic`) are counted: `max_trades_per_day`
+        limits round-trip deals, not individual legs. Counting every row made a
+        single grid entry with partial exits burn several units of the daily
+        limit at once.
 
         If since_ts > 0, count only trades on/after max(today_start, since_ts).
         Pass the real-session start (go-live epoch) so prior dry-run trades are
@@ -269,7 +257,8 @@ class TradeDatabase:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'SELECT COUNT(*) FROM trades WHERE timestamp >= ?',
+                "SELECT COUNT(*) FROM trades "
+                "WHERE timestamp >= ? AND side IN ('sell', 'sell_panic')",
                 (effective_start,)
             )
             count = cursor.fetchone()[0]

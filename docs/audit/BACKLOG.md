@@ -33,8 +33,13 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [ ] B-07 `archive/scanner_legacy.py`, root-level `analyze_entry.py`, `compare_metrics.py`,
   `compare_logs.ps1`, `daily_report.csv`, `trades.db` (root copy), `HYDRA_MATH_ANALYSIS.md`,
   `TRADING_TEST_RESULTS.md`, `roadmap.md` — decide keep/move to `docs/` or `scripts/`.
-- [ ] B-08 `breakeven.py:41-42` computes a fee-aware multiplier that is immediately overwritten at `:44`
-  (functional bug H8 is in the fix plan; the dead lines go here).
+- [x] B-08 `breakeven.py:41-42` computes a fee-aware multiplier that is immediately overwritten at `:44`
+  (functional bug H8 is in the fix plan; the dead lines go here). Done 2026-09-22 (TZ-05): the `1.001`
+  overwrite and the duplicate `price_to_precision` call removed; the fee-aware price is the one placed.
+- [ ] B-18 The same `buy_price * 1.001` breakeven price survives in `in_position.py:401`
+  (`_execute_partial_tp`, re-order of the remaining position) — below the 0.2% round-trip fee, so the
+  "breakeven" leg exits at a loss. Found during TZ-05; out of that TZ's scope (п.4 named only
+  `breakeven.py`). Fix by reusing the fee-aware multiplier, ideally extracted into one helper.
 
 ## Structure
 
@@ -53,10 +58,14 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [ ] B-14 `Dockerfile` runs as root (no `USER`); add a non-root user once volume permissions are sorted.
 - [ ] B-15 Grafana default password `triada2024` in `docker-compose.yml:91` — move to `.env`
   (`GRAFANA_PASSWORD` is already read; drop the fallback).
-- [ ] B-16 Docker healthcheck + `restart: unless-stopped` + in-process `HealthChecker` SIGTERM + external
+- [x] B-16 Docker healthcheck + `restart: unless-stopped` + in-process `HealthChecker` SIGTERM + external
   watchdog = four overlapping supervisors; decide on one owner (audit H2/H3, plan Phase 4 §17).
-- [ ] B-17 `tests/test_health.py:83,91` set `bot.state` to strings while production uses `BotState` Enum —
-  test must use the Enum once `health.py:134` is fixed.
+  Done 2026-09-22 (TZ-04): the external watchdog owns restart; `HealthChecker` only reports
+  (`@HEALTH_CRITICAL@` + `health_status=0`). Thresholds raised to 60s/20s. Docker `restart:
+  unless-stopped` and the compose healthcheck are left as-is — they do not race the watchdog.
+- [x] B-17 `tests/test_health.py:83,91` set `bot.state` to strings while production uses `BotState` Enum —
+  test must use the Enum once `health.py:134` is fixed. Done 2026-09-22 (TZ-04): `_check_state_stuck`
+  compares Enum members; `DummyBot` and all assignments use `BotState.*`.
 
 ## Done
 

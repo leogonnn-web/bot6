@@ -40,10 +40,7 @@ class BreakevenMixin:
             amount = self.state_data.get('amount', 0)
             raw_price = buy_price * breakeven_multiplier
             breakeven_price = float(self.exchange.exchange.price_to_precision(symbol, raw_price))
-
-            breakeven_price = buy_price * 1.001  # Small profit to cover fees
             amount = float(self.exchange.exchange.amount_to_precision(symbol, amount))
-            breakeven_price = float(self.exchange.exchange.price_to_precision(symbol, breakeven_price))
 
             if is_dry_run:
                 new_order_id = f"virtual_breakeven_{int(time.time())}"

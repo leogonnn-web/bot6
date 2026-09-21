@@ -118,6 +118,10 @@ class InPositionStateMixin:
                     self._panic_sell(urgent=True, reason='sl')
                     return
             else:
+                # Settle a resting partial-TP order before anything else can end
+                # the position, so session_profit reflects fills, not intents.
+                self._reconcile_partial_tp(symbol)
+
                 # Balance check: only a CONFIRMED empty balance may end the position.
                 # None (unknown) skips the check — the old code parsed the error stub
                 # as "0 coins" and reset a live position to IDLE.
@@ -302,6 +306,55 @@ class InPositionStateMixin:
             # and must retry. Only reset to IDLE if balance is below dust (handled
             # in _handle_in_position_state balance check).
 
+    def _reconcile_partial_tp(self, symbol: str):
+        """Book a partial take-profit only once the exchange confirms the fill.
+
+        Live-only. `_execute_partial_tp` parks the order id in state_data; here
+        we poll it and either log the `sell_partial` trade with realised PnL, or
+        drop the claim if the order was canceled. An UNKNOWN status (fetch_order
+        returns None) is NOT treated as "not filled" — we keep waiting.
+        """
+        order_id = self.state_data.get('partial_tp_order_id')
+        if not order_id:
+            return
+
+        order = self.exchange.fetch_order(order_id, symbol)
+        if order is None:
+            unk = int(self.state_data.get('partial_tp_unknown_count', 0)) + 1
+            self.state_data['partial_tp_unknown_count'] = unk
+            if unk == 1 or unk % 30 == 0:
+                logger.warning(
+                    f"@PARTIAL_TP_STATUS_UNKNOWN@ {symbol} order {order_id} unknown x{unk}; holding"
+                )
+            return
+        self.state_data['partial_tp_unknown_count'] = 0
+
+        status = order.get('status')
+        if status in ('closed', 'filled'):
+            filled = safe_float(order.get('filled')) or safe_float(self.state_data.get('partial_tp_amount'))
+            close_price = safe_float(order.get('average') or order.get('price') or self.state_data['buy_price'])
+            trade_profit = self._calc_pnl(self.state_data['buy_price'], close_price, filled)
+            self.session_profit += trade_profit
+            METRICS.session_profit.set(self.session_profit)
+            self.trade_db.log_trade(symbol, "sell_partial", filled, close_price, confidence=0.0, profit=trade_profit)
+            logger.info(
+                f"@PARTIAL_TP_DONE@ {symbol} partial TP filled {filled} @ {close_price}, "
+                f"PnL: ${trade_profit:+.2f}"
+            )
+        elif status in ('canceled', 'rejected', 'expired'):
+            logger.warning(
+                f"@PARTIAL_TP_CANCELED@ {symbol} partial TP order {order_id} is {status}; "
+                f"no PnL booked"
+            )
+        else:
+            return  # still open — wait
+
+        self.state_data.pop('partial_tp_order_id', None)
+        self.state_data.pop('partial_tp_amount', None)
+        self.state_data.pop('partial_tp_unknown_count', None)
+        if hasattr(self, '_save_state'):
+            self._save_state()
+
     def _execute_partial_tp(self, symbol: str, current_price: float, partial_tp_size_pct: float, is_dry_run: bool):
         """Execute partial take profit - sell portion of position"""
         try:
@@ -332,12 +385,16 @@ class InPositionStateMixin:
             # Update state with remaining amount
             self.state_data['amount'] = remaining_amount
 
-            # Log partial TP profit
-            trade_profit = self._calc_pnl(self.state_data['buy_price'], current_price, partial_amount)
-            self.session_profit += trade_profit
-            METRICS.session_profit.set(self.session_profit)
-            self.trade_db.log_trade(symbol, "sell_partial", partial_amount, current_price, confidence=0.0, profit=trade_profit)
-            logger.info(f"@PARTIAL_TP_DONE@ Partial TP complete. Profit: ${trade_profit:.2f}, Remaining: {remaining_amount}")
+            # A limit order is only an *intent*. Booking PnL here credited the
+            # session with profit from an order that may never fill (or fill at
+            # another price). Record it as pending; _reconcile_partial_tp() logs
+            # the trade once the exchange confirms the fill.
+            self.state_data['partial_tp_order_id'] = partial_order['id']
+            self.state_data['partial_tp_amount'] = partial_amount
+            logger.info(
+                f"@PARTIAL_TP_PENDING@ Partial TP order {partial_order['id']} resting for "
+                f"{partial_amount} @ ${current_price}; Remaining: {remaining_amount}"
+            )
 
             # Re-create sell order for remaining position at breakeven or original TP
             if self.state_data.get('is_breakeven', False):

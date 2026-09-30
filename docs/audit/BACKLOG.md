@@ -41,6 +41,14 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   "breakeven" leg exits at a loss. Found during TZ-05; out of that TZ's scope (п.4 named only
   `breakeven.py`). Fix by reusing the fee-aware multiplier, ideally extracted into one helper.
 
+- [ ] B-19 `scanning.py` `_validate_candidate` referenced `obi_skew_val` in its return dict while
+  the variable is only bound inside `if dispatcher_enabled:` — with the dispatcher off every
+  validated candidate raised `NameError` outside the surrounding try. Found during TZ-12A;
+  worked around by initialising `obi_skew_val = 0.0` / `context = {}` up front, but the real fix is
+  to build the `dispatcher_features` dict in one place instead of re-listing the keys.
+- [ ] B-20 `docs/bot_map.md` §4.5/§7.2 still shows the pre-TZ-12A `dispatcher_features` DDL
+  (no `spread_pct`, `bid_ask_source`, `entry_ask`, `source`, ...). Out of TZ-12A's file scope.
+
 ## Structure
 
 - [ ] B-09 Replace per-module `sys.path.append(... 'shared')` with a real package + one `PYTHONPATH`

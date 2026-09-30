@@ -17,7 +17,19 @@ from paths import TRADES_DB
 
 class TradeDatabase:
     """SQLite database for trade logging and session statistics"""
-    
+
+    # Columns added to dispatcher_features after the original schema shipped.
+    # Order matters only for readability; migration is idempotent.
+    # TZ-12A: liquidity truth + the exit rules in force at signal time, so
+    # offline labelling can replay the candidate without guessing. Measured once
+    # in the scanner and carried through state_data to the linked rows.
+    DF_CONTEXT_COLUMNS = (
+        'spread_pct', 'bid_vol', 'ask_vol', 'turnover24h', 'bid_ask_source',
+        'tp_pct', 'sl_pct', 'hold_sec', 'entry_ask', 'source',
+    )
+    DF_COLUMNS = ('profit', 'take_profit_pct') + DF_CONTEXT_COLUMNS
+    DF_TEXT_COLUMNS = ('bid_ask_source', 'source')
+
     def __init__(self, db_path: str = None):
         self.db_path = db_path or TRADES_DB
         self._conn: sqlite3.Connection | None = None
@@ -91,15 +103,27 @@ class TradeDatabase:
                     score REAL,
                     mode TEXT,
                     profit REAL,
-                    take_profit_pct REAL
+                    take_profit_pct REAL,
+                    spread_pct REAL,
+                    bid_vol REAL,
+                    ask_vol REAL,
+                    turnover24h REAL,
+                    bid_ask_source TEXT,
+                    tp_pct REAL,
+                    sl_pct REAL,
+                    hold_sec REAL,
+                    entry_ask REAL,
+                    source TEXT
                 )
             ''')
-            # Migration: add profit / take_profit_pct if missing
+            # Migration: add columns missing on pre-existing tables. REAL unless
+            # listed in DF_TEXT_COLUMNS (offline calibration inputs, TZ-12A).
             cursor.execute("PRAGMA table_info(dispatcher_features)")
             df_cols = [r[1] for r in cursor.fetchall()]
-            for col in ('profit', 'take_profit_pct'):
+            for col in self.DF_COLUMNS:
                 if col not in df_cols:
-                    cursor.execute(f"ALTER TABLE dispatcher_features ADD COLUMN {col} REAL")
+                    col_type = 'TEXT' if col in self.DF_TEXT_COLUMNS else 'REAL'
+                    cursor.execute(f"ALTER TABLE dispatcher_features ADD COLUMN {col} {col_type}")
                     logger.info(f"DB MIGRATION: added '{col}' to dispatcher_features")
             # Migration: add profit column if missing on existing table
             cursor.execute("PRAGMA table_info(trades)")
@@ -143,19 +167,35 @@ class TradeDatabase:
     def log_dispatcher_features(self, trade_id: int, symbol: str, confidence: float,
                                 rvol_spike: float, rvol_local: float, dump_depth: float,
                                 obi_skew: float, btc_1h: float, score: float, mode: str,
-                                profit: float = None, take_profit_pct: float = None):
-        """Log dispatcher scoring features for post-trade analysis (feedback loop data)."""
+                                profit: float = None, take_profit_pct: float = None,
+                                spread_pct: float = None, bid_vol: float = None,
+                                ask_vol: float = None, turnover24h: float = None,
+                                bid_ask_source: str = None, tp_pct: float = None,
+                                sl_pct: float = None, hold_sec: float = None,
+                                entry_ask: float = None, source: str = None):
+        """Log dispatcher scoring features for post-trade analysis (feedback loop data).
+
+        The TZ-12A parameters (spread_pct … source) default to None so older call
+        sites keep working; None means "not measured", which the offline labeller
+        (TZ-12B) treats as a reason to skip the row rather than as a zero.
+        `spread_pct` must be left None unless bid/ask came from a real book
+        (`bid_ask_source == 'book'`).
+        """
         try:
             ts = time.time()
             cols = [
                 'trade_id', 'timestamp', 'symbol', 'confidence', 'rvol_spike',
                 'rvol_local', 'dump_depth', 'obi_skew', 'btc_1h', 'score', 'mode',
-                'profit', 'take_profit_pct'
+                'profit', 'take_profit_pct',
+                'spread_pct', 'bid_vol', 'ask_vol', 'turnover24h', 'bid_ask_source',
+                'tp_pct', 'sl_pct', 'hold_sec', 'entry_ask', 'source',
             ]
             vals = [
                 trade_id, ts, symbol, confidence, rvol_spike,
                 rvol_local, dump_depth, obi_skew, btc_1h, score, mode,
-                profit, take_profit_pct
+                profit, take_profit_pct,
+                spread_pct, bid_vol, ask_vol, turnover24h, bid_ask_source,
+                tp_pct, sl_pct, hold_sec, entry_ask, source,
             ]
             ph = ','.join('?' for _ in vals)
             sql = f"INSERT INTO dispatcher_features ({','.join(cols)}) VALUES ({ph})"

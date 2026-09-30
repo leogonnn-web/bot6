@@ -23,6 +23,10 @@ class WebSocketListener:
 
     WS_URL = 'wss://stream.bybit.com/v5/public/spot'
 
+    # How long a top-of-book quote stays authoritative before the ticker
+    # handler is allowed to fall back to a synthetic spread.
+    BOOK_FRESH_SEC = 5.0
+
     def __init__(self, api_key: str, secret: str):
         self.api_key = api_key
         self.secret = secret
@@ -77,32 +81,78 @@ class WebSocketListener:
         return raw
 
     def _update_price(self, symbol: str, data: Dict) -> None:
-        """Thread-safe price update from Bybit V5 ticker data"""
+        """Thread-safe price update from Bybit V5 ticker data.
+
+        bid/ask precedence (audit H6): the ticker's own bid1Price/ask1Price (a
+        real top-of-book quote), then a still-fresh orderbook.1 top-of-book, and
+        only if neither exists a synthetic 0.05% spread around lastPrice. The
+        synthetic values must never overwrite real quotes — the spread filter and
+        the limit-chase price both read this dict, and fabricated quotes made
+        both of them meaningless. `book_ts` is the timestamp of the last *real*
+        quote; `bid_ask_source` is 'book' or 'synthetic'.
+        """
         now = time.time()
         # Bybit V5 spot ticker provides lastPrice; bid1Price/ask1Price may be absent
         last = safe_float(data.get('lastPrice', data.get('last')))
         ask = safe_float(data.get('ask1Price', data.get('askPrice')))
         bid = safe_float(data.get('bid1Price', data.get('bidPrice')))
-        # Approximate missing bid/ask with a 0.05% synthetic spread around lastPrice
-        if last > 0:
-            if ask == 0:
-                ask = round(last * 1.0005, 8)
-            if bid == 0:
-                bid = round(last * 0.9995, 8)
-        price = {
-            'ask': ask,
-            'bid': bid,
-            'last': last,
-            'timestamp': now,
-            'turnover24h': safe_float(data.get('turnover24h', 0)),
-            'volume24h': safe_float(data.get('volume24h', 0)),
-            'bidVolume': safe_float(data.get('bid1Size', 0)),
-            'askVolume': safe_float(data.get('ask1Size', 0)),
-        }
+        source = ''
         with self.price_lock:
+            prev = self.latest_prices.get(symbol) or {}
+            book_ts = safe_float(prev.get('book_ts', 0))
+            if bid > 0 and ask > 0:
+                source = 'book'
+                book_ts = now
+            elif book_ts > 0 and (now - book_ts) < self.BOOK_FRESH_SEC:
+                prev_bid = safe_float(prev.get('bid'))
+                prev_ask = safe_float(prev.get('ask'))
+                if prev_bid > 0 and prev_ask > 0:
+                    bid, ask = prev_bid, prev_ask
+                    source = 'book'
+            if not source and last > 0:
+                # No quotes at all — approximate with a 0.05% synthetic spread.
+                if ask == 0:
+                    ask = round(last * 1.0005, 8)
+                if bid == 0:
+                    bid = round(last * 0.9995, 8)
+                source = 'synthetic'
+            price = {
+                'ask': ask,
+                'bid': bid,
+                'last': last,
+                'timestamp': now,
+                'turnover24h': safe_float(data.get('turnover24h', 0)),
+                'volume24h': safe_float(data.get('volume24h', 0)),
+                'bidVolume': safe_float(data.get('bid1Size', 0)) or safe_float(prev.get('bidVolume', 0)),
+                'askVolume': safe_float(data.get('ask1Size', 0)) or safe_float(prev.get('askVolume', 0)),
+                'bid_ask_source': source or prev.get('bid_ask_source', ''),
+                'book_ts': book_ts,
+            }
             self.latest_prices[symbol] = price
         with self.update_lock:
             self.last_update_time[symbol] = now
+
+    def _update_orderbook(self, symbol: str, bids: list, asks: list) -> None:
+        """Merge an orderbook.1 top-of-book snapshot into the price cache.
+
+        Stores both sizes (OBI) and prices (spread filter, limit chase) and
+        stamps `book_ts` so the ticker handler knows the quotes are real.
+        """
+        now = time.time()
+        bid_price = safe_float(bids[0][0]) if bids and len(bids[0]) >= 2 else 0.0
+        bid_size = safe_float(bids[0][1]) if bids and len(bids[0]) >= 2 else 0.0
+        ask_price = safe_float(asks[0][0]) if asks and len(asks[0]) >= 2 else 0.0
+        ask_size = safe_float(asks[0][1]) if asks and len(asks[0]) >= 2 else 0.0
+        with self.price_lock:
+            existing = self.latest_prices.get(symbol, {})
+            existing['bidVolume'] = bid_size
+            existing['askVolume'] = ask_size
+            if bid_price > 0 and ask_price > 0:
+                existing['bid'] = bid_price
+                existing['ask'] = ask_price
+                existing['book_ts'] = now
+                existing['bid_ask_source'] = 'book'
+            self.latest_prices[symbol] = existing
 
     # ------------------------------------------------------------------
     # publicTrade ingestion (for ToxicFlowFilter)
@@ -260,16 +310,9 @@ class WebSocketListener:
                                 data = msg.get('data', {})
                                 if ccxt_symbol and data:
                                     # orderbook.1 gives b/a arrays: [[price, size], ...]
-                                    bids = data.get('b', [])
-                                    asks = data.get('a', [])
-                                    bid_size = safe_float(bids[0][1]) if bids and len(bids[0]) >= 2 else 0.0
-                                    ask_size = safe_float(asks[0][1]) if asks and len(asks[0]) >= 2 else 0.0
-                                    # Merge sizes into existing price dict (create if absent)
-                                    with self.price_lock:
-                                        existing = self.latest_prices.get(ccxt_symbol, {})
-                                        existing['bidVolume'] = bid_size
-                                        existing['askVolume'] = ask_size
-                                        self.latest_prices[ccxt_symbol] = existing
+                                    self._update_orderbook(
+                                        ccxt_symbol, data.get('b', []), data.get('a', [])
+                                    )
                             elif topic.startswith('publicTrade.'):
                                 raw_symbol = topic.split('.', 1)[1]
                                 ccxt_symbol = raw_to_ccxt.get(raw_symbol)

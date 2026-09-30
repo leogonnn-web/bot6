@@ -187,6 +187,8 @@ class ScanningStateMixin:
             return None
         dispatcher_score = 0.0
         dispatcher_mode = "normal"
+        obi_skew_val = 0.0
+        context = {}
         try:
             if getattr(self, 'dispatcher_enabled', False):
                 # obi_light: express OBI from top-1 bid/ask volumes in ticker cache
@@ -202,6 +204,7 @@ class ScanningStateMixin:
                 dispatcher_mode = self.dispatcher.select_mode(
                     score=dispatcher_score, btc_1h=btc_change_1h,
                 )
+                context = self._candidate_context(ticker_data, bid_vol, ask_vol, dispatcher_mode)
                 # Phase 1: Log features to DB (feedback_loop = OFF)
                 has_db = hasattr(self, 'trade_db')
                 db_ok = bool(self.trade_db) if has_db else False
@@ -218,6 +221,7 @@ class ScanningStateMixin:
                             btc_1h=btc_change_1h,
                             score=dispatcher_score,
                             mode=dispatcher_mode,
+                            **context,
                         )
                         logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol}")
                     except Exception as db_err:
@@ -244,8 +248,48 @@ class ScanningStateMixin:
                 'btc_1h': btc_change_1h,
                 'score': dispatcher_score,
                 'mode': dispatcher_mode,
+                # Carried to the trade-linked rows logged in buying.py / bot.py
+                # so every row for one candidate shares the same context.
+                **context,
             }
         }
+
+    def _candidate_context(self, ticker_data: dict, bid_vol: float,
+                           ask_vol: float, mode: str) -> dict:
+        """Liquidity truth + exit rules in force, for offline labelling (TZ-12A).
+
+        `spread_pct` is left None unless bid/ask came from a real book: the
+        synthetic 0.05% spread would otherwise look like a tradable quote.
+        """
+        trading_config = self.config.get_trading_config()
+        bid_ask_source = ticker_data.get('bid_ask_source') or None
+        bid = safe_float(ticker_data.get('bid', 0))
+        ask = safe_float(ticker_data.get('ask', 0))
+        spread_pct = None
+        if bid_ask_source == 'book' and bid > 0 and ask > 0:
+            spread_pct = ((ask - bid) / ask) * 100
+        tp_pct = self.dispatcher.get_grid_params(mode).take_profit_pct
+        if not tp_pct:
+            tp_pct = self.config.get_take_profit_pct()
+        return {
+            'spread_pct': spread_pct,
+            'bid_vol': bid_vol,
+            'ask_vol': ask_vol,
+            'turnover24h': safe_float(ticker_data.get('quoteVolume',
+                                                      ticker_data.get('turnover24h', 0))),
+            'bid_ask_source': bid_ask_source,
+            'tp_pct': tp_pct,
+            'sl_pct': trading_config.get('panic_stop'),
+            'hold_sec': trading_config.get('hard_exit_timeout_sec'),
+            'entry_ask': ask if ask > 0 else None,
+            'source': self._data_source(trading_config),
+        }
+
+    def _data_source(self, trading_config: dict) -> str:
+        """Which exchange reality produced this row: dry_run | demo | live."""
+        if trading_config.get('dry_run', False):
+            return 'dry_run'
+        return 'demo' if getattr(self.exchange, 'demo_trading', False) else 'live'
 
     def _handle_scanning_state(self):
         # Background thread continuously updates dispatcher_candidates.

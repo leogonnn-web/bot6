@@ -37,6 +37,8 @@ class BuyingStateMixin:
                         btc_1h=df.get('btc_1h', 0.0),
                         score=df.get('score', 0.0),
                         mode=df.get('mode', 'normal'),
+                        # Scan-time liquidity / exit-rule context (TZ-12A)
+                        **{k: df.get(k) for k in self.trade_db.DF_CONTEXT_COLUMNS},
                     )
                     logger.info(f"@DISPATCHER_LINK@ Features linked to trade_id={trade_id}")
                 except Exception as df_err:

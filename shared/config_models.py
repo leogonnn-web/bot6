@@ -6,9 +6,9 @@ Design notes
 * Goal: catch type errors / out-of-range values BEFORE the trading loop starts,
   so the bot fails fast with a clear log message instead of crashing later
   inside a hot path with cryptic stack traces.
-* Scope: only `trading` and `hydra_net` sections are validated, as requested
-  by the spec. Everything else (indicators, scanner, market_conditions, ...)
-  is passed through untouched.
+* Scope: only `trading`, `hydra_net` and `exchange` sections are validated, as
+  requested by the spec. Everything else (indicators, scanner,
+  market_conditions, ...) is passed through untouched.
 * `extra='allow'` is critical: the real JSON has ~25+ fields per section, but
   the spec only requires us to type-check a handful. Forbidding extras would
   break every existing caller that relies on `trading_config.get('foo', def)`.
@@ -86,6 +86,20 @@ class HydraNetConfig(BaseModel):
     min_order_size_usdt: float = Field(gt=0.0, description="Minimum order size in USDT")
 
 
+class ExchangeConfig(BaseModel):
+    """Schema for the `exchange` section.
+
+    `demo_trading` selects Bybit Demo Trading (api-demo.bybit.com): the live
+    order/balance code paths run against a virtual balance. Keys are then read
+    from BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET.
+    """
+
+    model_config = ConfigDict(extra='allow')
+
+    name: str = Field(default='bybit', description="Exchange id (ccxt)")
+    demo_trading: bool = Field(default=False, description="Use Bybit Demo Trading endpoint")
+
+
 def validate_config(raw_config: dict) -> dict:
     """Validate `trading` and `hydra_net` sections of a fully-merged config dict.
 
@@ -93,8 +107,9 @@ def validate_config(raw_config: dict) -> dict:
         raw_config: The dict produced after default-config + JSON deep-merge.
 
     Returns:
-        A dict identical to ``raw_config`` except that ``trading`` and
-        ``hydra_net`` are re-emitted from the validated Pydantic models.
+        A dict identical to ``raw_config`` except that ``trading``,
+        ``hydra_net`` and ``exchange`` are re-emitted from the validated
+        Pydantic models.
         Existing call sites (which use ``dict.get(key, default)``) keep working
         unchanged.
 
@@ -125,6 +140,14 @@ def validate_config(raw_config: dict) -> dict:
             errors.append(_format_pydantic_errors('hydra_net', exc))
     # NOTE: `hydra_net` is optional — bot can run without it (grid disabled).
     # Only validate when present.
+
+    exchange_raw = raw_config.get('exchange')
+    if isinstance(exchange_raw, dict):
+        try:
+            out['exchange'] = ExchangeConfig.model_validate(exchange_raw).model_dump()
+        except ValidationError as exc:
+            errors.append(_format_pydantic_errors('exchange', exc))
+    # `exchange` is optional too; the in-code default supplies it.
 
     if errors:
         raise ConfigValidationError("\n".join(errors))

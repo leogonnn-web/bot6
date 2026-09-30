@@ -155,6 +155,17 @@ python -m pytest tests/test_watchdog.py -q    # 14 passed (проверено 20
 
 **Перед любым запуском сверить оба конфига явно.** Локальный конфиг не является источником истины для сервера.
 
+### Три режима запуска (TZ-11)
+
+| Режим | `trading.dry_run` | `exchange.demo_trading` | Ключи из `.env` | Что исполняется |
+|---|---|---|---|---|
+| Dry-run | `true` | не важно | — (без ключей работает) | Виртуальные ордера; ветки `if is_dry_run:`. Live-код (`fetch_order`, `cancel`, баланс, партиалы) **не проверяется** |
+| Демо | `false` | `true` | `BYBIT_DEMO_API_KEY` / `BYBIT_DEMO_API_SECRET` | Полный live-код против `api-demo.bybit.com`: реальные цены, виртуальный баланс |
+| Реал | `false` | `false` | `BYBIT_API_KEY` / `BYBIT_API_SECRET` | Деньги. Требует `HYDRA_LIVE_CONFIRM=yes` в окружении, иначе `main.py` печатает `@LIVE_GUARD@` и выходит с кодом `2` |
+
+Демо-ключи выпускаются отдельно в кабинете Bybit (Demo Trading) и не взаимозаменяемы с боевыми.
+В логе при старте: `@EXCHANGE_INIT@ ... mode=DEMO` / `mode=LIVE`.
+
 ### Capital Router
 
 `shared/capital_router.py` сам ограничивает режим по балансу:

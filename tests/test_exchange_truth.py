@@ -148,3 +148,68 @@ def test_non_usdt_holdings(client):
 def test_fetch_ticker_error_is_none_not_zero_price(client):
     client.exchange.fail_ticker = True
     assert client.fetch_ticker('SHIB/USDT') is None
+
+
+# ------------------------------------------------------- demo trading (TZ-11)
+class FakeExchangeFactory:
+    """Stand-in for ccxt.bybit: records the config and demo switch."""
+
+    def __init__(self):
+        self.params = None
+        self.demo_calls = []
+
+    def __call__(self, params):
+        self.params = params
+        return self
+
+    def enable_demo_trading(self, flag):
+        self.demo_calls.append(flag)
+
+
+def test_demo_true_uses_demo_keys_and_enables_demo_trading(monkeypatch):
+    import ccxt
+    factory = FakeExchangeFactory()
+    monkeypatch.setattr(ccxt, 'bybit', factory)
+    monkeypatch.setenv('BYBIT_API_KEY', 'live_key')
+    monkeypatch.setenv('BYBIT_API_SECRET', 'live_secret')
+    monkeypatch.setenv('BYBIT_DEMO_API_KEY', 'demo_key')
+    monkeypatch.setenv('BYBIT_DEMO_API_SECRET', 'demo_secret')
+
+    c = BybitClient(demo=True)
+
+    assert c.demo_trading is True
+    assert c.api_key == 'demo_key'
+    assert c.secret == 'demo_secret'
+    assert factory.params['apiKey'] == 'demo_key'
+    assert factory.demo_calls == [True]
+
+
+def test_demo_false_uses_live_keys_and_never_enables_demo(monkeypatch):
+    import ccxt
+    factory = FakeExchangeFactory()
+    monkeypatch.setattr(ccxt, 'bybit', factory)
+    monkeypatch.setenv('BYBIT_API_KEY', 'live_key')
+    monkeypatch.setenv('BYBIT_API_SECRET', 'live_secret')
+    monkeypatch.setenv('BYBIT_DEMO_API_KEY', 'demo_key')
+    monkeypatch.setenv('BYBIT_DEMO_API_SECRET', 'demo_secret')
+
+    c = BybitClient(demo=False)
+
+    assert c.demo_trading is False
+    assert (c.api_key, c.secret) == ('live_key', 'live_secret')
+    assert factory.demo_calls == []
+
+
+def test_demo_none_reads_flag_from_config(monkeypatch):
+    import ccxt
+    factory = FakeExchangeFactory()
+    monkeypatch.setattr(ccxt, 'bybit', factory)
+    monkeypatch.setattr(BybitClient, '_demo_from_config', staticmethod(lambda: True))
+    monkeypatch.setenv('BYBIT_DEMO_API_KEY', 'demo_key')
+    monkeypatch.setenv('BYBIT_DEMO_API_SECRET', 'demo_secret')
+
+    c = BybitClient()
+
+    assert c.demo_trading is True
+    assert factory.demo_calls == [True]
+

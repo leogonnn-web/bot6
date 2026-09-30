@@ -365,14 +365,33 @@ class WebSocketListener:
 class BybitClient:
     """Bybit V5 API client - pure exchange interface"""
     
-    def __init__(self, api_key: str = None, secret: str = None):
+    @staticmethod
+    def _demo_from_config() -> bool:
+        """Read `exchange.demo_trading` from the shared config.
+
+        Deliberately not wrapped in try/except: if the config cannot be read we
+        must not silently fall back to LIVE keys.
+        """
+        from config import config
+        return bool(config.config.get('exchange', {}).get('demo_trading', False))
+
+    def __init__(self, api_key: str = None, secret: str = None, demo: bool = None):
         import ccxt
-        
-        self.api_key = api_key or os.getenv('BYBIT_API_KEY', '')
-        self.secret = secret or os.getenv('BYBIT_API_SECRET', '')
-        
-        logger.info("@EXCHANGE_INIT@ Initializing Bybit V5 client...")
-        
+
+        # demo=None → take the flag from config (`exchange.demo_trading`).
+        self.demo_trading = self._demo_from_config() if demo is None else bool(demo)
+
+        # Demo Trading is a separate Bybit account with its own credentials.
+        if self.demo_trading:
+            self.api_key = api_key or os.getenv('BYBIT_DEMO_API_KEY', '')
+            self.secret = secret or os.getenv('BYBIT_DEMO_API_SECRET', '')
+        else:
+            self.api_key = api_key or os.getenv('BYBIT_API_KEY', '')
+            self.secret = secret or os.getenv('BYBIT_API_SECRET', '')
+
+        mode = 'DEMO' if self.demo_trading else 'LIVE'
+        logger.info(f"@EXCHANGE_INIT@ Initializing Bybit V5 client... mode={mode}")
+
         # REST API client
         self.exchange = ccxt.bybit({
             'apiKey': self.api_key,
@@ -384,7 +403,12 @@ class BybitClient:
                 'createMarketBuyOrderRequiresPrice': False
             }
         })
-        
+        if self.demo_trading:
+            # Switches every REST endpoint to api-demo.bybit.com (real market
+            # data, virtual balance) — the only way to exercise the live order
+            # code paths without money.
+            self.exchange.enable_demo_trading(True)
+
         # WebSocket listener
         self.ws_listener = WebSocketListener(self.api_key, self.secret)
     

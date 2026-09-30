@@ -183,7 +183,8 @@
     "CRV/USDT"
   ],
   "exchange": {
-    "name": "bybit"
+    "name": "bybit",
+    "demo_trading": false
   },
   "api_retry": {
     "max_retries": 3,

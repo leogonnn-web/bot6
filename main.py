@@ -14,7 +14,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src'
 
 
 def main() -> int:
-    """Main entry point. Returns process exit code (0 = ok, 1 = config error)."""
+    """Main entry point.
+
+    Returns process exit code (0 = ok, 1 = config error, 2 = live guard).
+    """
     # ------------------------------------------------------------------
     # Step 1: load + validate config FIRST. We do this before importing
     # TradingBot so that a config error fails fast with a clean message
@@ -37,7 +40,21 @@ def main() -> int:
         raise
 
     # ------------------------------------------------------------------
-    # Step 2: start the bot
+    # Step 2: live guard. Real money requires an explicit env confirmation.
+    # Checked BEFORE importing core.bot so a misconfigured deploy cannot even
+    # construct the bot. Three legal modes:
+    #   dry_run=true                                  → virtual orders
+    #   dry_run=false, demo_trading=true              → live code, demo exchange
+    #   dry_run=false, demo_trading=false + CONFIRM   → real money
+    # ------------------------------------------------------------------
+    dry_run = bool(config.get_trading_config().get('dry_run', True))
+    demo_trading = bool(config.config.get('exchange', {}).get('demo_trading', False))
+    if not dry_run and not demo_trading and os.getenv('HYDRA_LIVE_CONFIRM') != 'yes':
+        print("[FATAL] @LIVE_GUARD@ real trading requires HYDRA_LIVE_CONFIRM=yes")
+        return 2
+
+    # ------------------------------------------------------------------
+    # Step 3: start the bot
     # ------------------------------------------------------------------
     from core.bot import TradingBot
     bot = TradingBot()

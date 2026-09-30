@@ -165,7 +165,119 @@
 
 ---
 
+## TZ-11 — Demo Trading + предохранитель live (подготовка к тест-плану)
+
+**Модель / режим:** дешёвая, low.
+**Файлы:** `src/api/bybit_client.py` (только `BybitClient.__init__`), `shared/config.json`, `shared/config_models.py`, `main.py`,
+`.env.example`, `docs/HANDOFF.md`, `tests/test_exchange_truth.py` (добавить), новый `tests/test_live_guard.py`.
+
+**Зачем.** Dry-run — это `if is_dry_run:` в десятках мест и виртуальные ордера; он не исполняет live-код (fetch_order,
+cancel, баланс, partial fill). Bybit Demo Trading (`api-demo.bybit.com`) даёт боевое API с реальными ценами и виртуальным
+балансом — единственный способ прогнать Фазу 1 и сетку без денег.
+
+**Шаги.**
+1. `shared/config.json` → секция `exchange`: добавить `"demo_trading": false`. `config_models.py`: поле `demo_trading: bool = False`
+   в модели `exchange` (если модели нет — см. TZ-07; минимально — добавить в существующую валидацию).
+2. `BybitClient.__init__`: ключи брать из `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET`, если `demo_trading`, иначе из
+   `BYBIT_API_KEY`/`BYBIT_API_SECRET`. При `demo_trading` после создания `ccxt.bybit(...)` вызвать
+   `self.exchange.enable_demo_trading(True)`; лог `@EXCHANGE_INIT@ ... mode=DEMO`. Сигнатура `__init__(api_key=None, secret=None, demo=None)`;
+   `demo=None` → читать из `config` (импорт `from config import config` уже доступен через `shared`).
+3. **Live guard** в `main.py` перед `TradingBot(...)`: если `trading.dry_run is False` **и** `exchange.demo_trading is False`
+   **и** `os.getenv('HYDRA_LIVE_CONFIRM') != 'yes'` → `print("[FATAL] @LIVE_GUARD@ real trading requires HYDRA_LIVE_CONFIRM=yes")`,
+   `return 2`. Проверка выполняется до импорта `core.bot`.
+4. `.env.example`: `BYBIT_DEMO_API_KEY=`, `BYBIT_DEMO_API_SECRET=`, `HYDRA_LIVE_CONFIRM=` с комментариями.
+5. `docs/HANDOFF.md` §3 «Конфиг»: таблица трёх режимов — `dry_run=true` (виртуальные ордера) / `dry_run=false, demo_trading=true`
+   (живой код, демо-биржа) / `dry_run=false, demo_trading=false, HYDRA_LIVE_CONFIRM=yes` (деньги).
+6. Тесты: (a) `BybitClient(demo=True)` с фейковым ccxt-объектом → `enable_demo_trading(True)` вызван, ключи взяты из DEMO-переменных;
+   (b) `main()` при `dry_run=false, demo_trading=false` без `HYDRA_LIVE_CONFIRM` → код возврата 2, `core.bot` не импортирован
+   (проверять через `sys.modules`); (c) с `HYDRA_LIVE_CONFIRM=yes` guard пропускает (дальше замокать `TradingBot`).
+
+**Критерии.** `grep -n "enable_demo_trading" src/api/bybit_client.py` → 1; `grep -n "HYDRA_LIVE_CONFIRM" main.py` → ≥1; pytest зелёный.
+**Не трогать.** Логику ордеров, WS.
+
+---
+
+## TZ-12 — Офлайн-калибровка весов диспетчера: данные, разметка, анализ
+
+Онлайн-обучение (`dispatcher.feedback_loop`, `learning_rate`) **не включать**: градиентный шаг по PnL одной сделки при
+N < тысяч — случайное блуждание весов, меняющее поведение бота, который генерирует следующие данные.
+Веса подбираются офлайн по размеченным кандидатам; исходом считается **ценовой путь после сигнала**, а не исполненная сделка —
+это даёт данные по всем кандидатам, включая невыбранных, и не зависит от того, dry-run это, демо или реал.
+
+Критика, учтённая в ТЗ (2026-09-30): (1) у существующих строк `dispatcher_features` нет реальных данных о ликвидности —
+спред в сканере считается по **синтетическим** bid/ask (`bybit_client.py:86-91`), поэтому сначала инструментирование (12A);
+(2) исход должен считаться той же `utils.realized_pnl`, что и бот, с проскальзыванием для маркет-выходов;
+(3) `calculate_score` уже нелинейный (сигмоида дампа с центром 4.5%, `dispatcher.py:83`; клампы) — проверять надо формы
+преобразований, а не только веса.
+
+### TZ-12A — Инструментирование (в бот)
+
+**Модель / режим:** средняя, medium (трогает WS-клиент и БД).
+**Файлы:** `src/api/bybit_client.py:257-272`, `src/database/models.py` (схема + `log_dispatcher_features`),
+`src/core/states/scanning.py` (`_validate_candidate`, вызовы `log_dispatcher_features`), `src/core/grid/hydra_net.py` и
+`src/core/states/buying.py` (только сигнатура вызова), `tests/test_exchange_truth.py` или новый тест WS-парсера.
+
+1. `bybit_client.py` обработчик `orderbook.1`: кроме размеров сохранять **цены** `bids[0][0]` → `existing['bid']`,
+   `asks[0][0]` → `existing['ask']`, и `existing['book_ts'] = now`. В `_update_price` (тикер) **не перетирать** bid/ask синтетикой,
+   если `book_ts` свежее 5 с; синтетика — только когда стакана нет вовсе. Пометить `existing['bid_ask_source'] = 'book' | 'synthetic'`.
+   Это закрывает аудит H6 (спред-фильтр и лимит-чейз по выдуманным ценам).
+2. `models.py`: миграция (по образцу `:98-104`) — колонки `spread_pct REAL`, `bid_vol REAL`, `ask_vol REAL`, `turnover24h REAL`,
+   `bid_ask_source TEXT`, `tp_pct REAL`, `sl_pct REAL`, `hold_sec REAL`, `entry_ask REAL`, `source TEXT` (`dry_run|demo|live`).
+   `log_dispatcher_features(...)` — новые параметры со значениями по умолчанию `None`, чтобы старые вызовы не ломались.
+3. `scanning.py` `_validate_candidate`: передавать `spread_pct` (из реальных bid/ask, `None` если `bid_ask_source != 'book'`),
+   `bid_vol`, `ask_vol`, `turnover24h`, `entry_ask`, `tp_pct` (из `dispatcher.get_grid_params(mode).take_profit_pct` либо конфиг),
+   `sl_pct` (`trading.panic_stop`), `hold_sec` (`trading.hard_exit_timeout_sec`), `source`.
+4. Тест: фрейм `orderbook.1` с `[[0.99,100]]/[[1.01,80]]` → в кеше `bid=0.99, ask=1.01, source='book'`; последующий тикер без bid/ask
+   не перетирает их.
+
+**Критерии.** `PRAGMA table_info(dispatcher_features)` содержит новые колонки; в dry-run логе `@DISPATCHER_LOG@` строки пишутся
+с `bid_ask_source='book'` для ликвидных пар; pytest зелёный.
+
+### TZ-12B — Разметка (`scripts/analysis/label_candidates.py`)
+
+**Модель / режим:** дешёвая, low. Читает `trades.db` и OHLCV через ccxt (публичные эндпоинты, ключи не нужны). Ничего не пишет в код бота.
+
+Вход: строки `dispatcher_features` с `entry_ask IS NOT NULL` (т.е. после 12A). Для каждой:
+1. **Фильтр ликвидности** (критика №1): пропустить, если `bid_ask_source != 'book'`, или `spread_pct > trading.spread_max`,
+   или `turnover24h < trading.min_volume_usdt`, или `min(bid_vol, ask_vol) * entry_ask < 3 * slot_size`. Причину отсева записать в колонку `skip_reason`.
+2. Загрузить 1m OHLCV от `timestamp` на `hold_sec + 60` секунд вперёд.
+3. **Консервативное исполнение**: вход по `entry_ask` (не `last`). TP = `entry_ask * (1 + tp_pct/100)` засчитывается только если
+   `high >= TP + tick` (прошли сквозь уровень, а не коснулись). SL = `entry_ask * (1 - sl_pct/100)` — по касанию (`low <= SL`).
+   Если в одной свече и TP, и SL — считать **SL** (пессимизм). Ни то, ни другое за `hold_sec` → `timeout`, выход по `close` последней свечи.
+4. **Исход в USDT** — только через `shared.utils.realized_pnl(buy, sell, qty, fee_pct, slippage_pct)`: `tp` → `slippage=0`;
+   `sl`, `timeout` → `slippage = trading.panic_slippage_pct` (критика №2). `qty = slot_size / entry_ask`. Никакой собственной формулы комиссий.
+5. Выход: таблица `candidate_labels` в той же БД (или CSV в `data/`): `feature_id, label ∈ {tp, sl, timeout, skipped}, skip_reason,
+   bars_to_outcome, net_usdt, net_pct, labelled_at`. Идемпотентно: уже размеченные строки не пересчитывать.
+
+**Критерии.** Прогон на dry-run БД без ошибок; `SELECT label, COUNT(*) FROM candidate_labels GROUP BY label` даёт все четыре класса;
+юнит-тест на синтетических свечах: (a) TP и SL в одной свече → `sl`; (b) касание TP без прохода → не `tp`; (c) `timeout` использует slippage.
+
+### TZ-12C — Анализ (`scripts/analysis/score_vs_outcome.py` + отчёт)
+
+**Модель / режим:** средняя, medium; выводы — сильная модель/оператор. Только чтение данных.
+Требование к данным: ≥ 300 размеченных (не `skipped`) кандидатов, ≥ 7 календарных дней.
+
+1. **Формы признаков до весов** (критика №3): для каждого сырого признака (`confidence, rvol_spike, dump_depth, obi_skew, btc_1h`)
+   — децили → доля `tp`, средний `net_pct`, N в бине. График/таблица. Проверить монотонность; для `dump_depth` — явно сравнить с
+   текущей сигмоидой (центр 4.5, наклон 0.7). Если зависимость U-образная/горб — предложить замену преобразования, **не** веса.
+2. **Скор vs исход**: децили текущего `score` → доля `tp`, `net_pct`. Это ответ на вопрос «диспетчер вообще что-то предсказывает?».
+3. **Подбор весов**: логистическая регрессия `P(tp)` на *преобразованных* признаках (те же `c_norm, r_norm, d_norm, o_norm, btc_ok`,
+   что в `calculate_score`), обучение на первых 70 % **по времени**, проверка на последних 30 %. Никаких деревьев/бустинга.
+4. **Значимость**: средний `net_pct` топ-квартиля по новому скору vs по дефолтному — **блочный бутстрап по дням** (кандидаты одного часа
+   коррелированы), 95 % интервал. Если интервал накрывает 0 — вывод «неразличимо», веса **не менять**. Это нормальный результат.
+5. Разбивка по `source` (`dry_run|demo|live`) — исходы не должны систематически расходиться; если расходятся, разбираться с 12B, а не с весами.
+6. Отчёт `docs/audit/03_dispatcher_calibration_<дата>.md`: таблицы из п.1–5, вывод, предложенные веса **или** решение оставить дефолт.
+   Применение весов — только вручную: `dispatcher_weights.json` → демо 2–3 дня → live.
+
+**Не делать.** Не включать `feedback_loop`; не менять `dispatcher.py` в рамках 12C (изменение преобразований — отдельное ТЗ по результатам отчёта).
+
+---
+
 ## Порядок
 
-TZ-06 (мёртвый код, чтобы Фаза 3 правила чистые файлы) → TZ-04 (надзор) → TZ-05 (учёт) → TZ-07 → TZ-08 → TZ-09.
-Фаза 3 (сетка) — сильная модель, после TZ-06. TZ-10 — после Фазы 3 и суток dry-run.
+TZ-06 ✓ → TZ-04 ✓ → TZ-05 ✓ → **TZ-11** (нужен для тест-плана) → **TZ-12A** (данные начинают копиться сразу) → TZ-07 → TZ-08 → TZ-09 → B-18.
+Фаза 3 (сетка) — сильная модель. TZ-10 — после Фазы 3 и суток dry-run. TZ-12B — после ≥ 3 дней сбора с 12A; TZ-12C — после ≥ 300 меток.
+
+Тест-план после рихтовки (2026-09-30): dry-run 12–24 ч (стабильность после TZ-04) → демо `max_grid_levels=1` 2–3 дня → демо
+`max_grid_levels=3` 2–3 дня (после Фазы 3) → демо с искусственными обрывами сети в BUYING/IN_POSITION → реал минимальным слотом,
+`HYDRA_LIVE_CONFIRM=yes` руками.

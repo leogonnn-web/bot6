@@ -43,8 +43,13 @@ class TestSimpleLimitStrategy:
     def test_amend_delegates(self):
         client, strat = self._make()
         r = strat.amend('ord_123', 'BTC/USDT', 0.2, 59000.0)
-        client.amend_order.assert_called_once_with('ord_123', 'BTC/USDT', 0.2, 59000.0)
+        client.amend_order.assert_called_once_with('ord_123', 'BTC/USDT', 0.2, 59000.0, side='buy')
         assert r['id'] == 'amend_1'
+
+    def test_amend_passes_sell_side(self):
+        client, strat = self._make()
+        strat.amend('ord_123', 'BTC/USDT', 0.2, 59000.0, side='sell')
+        client.amend_order.assert_called_once_with('ord_123', 'BTC/USDT', 0.2, 59000.0, side='sell')
 
 
 class TestOrderManager:

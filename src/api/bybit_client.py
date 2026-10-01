@@ -656,10 +656,47 @@ class BybitClient:
             logger.error(f"@ORDER_ERROR@ Cancel failed for {order_id}: {e}")
             raise
     
-    def amend_order(self, order_id: str, symbol: str, amount: float, price: float) -> Optional[Dict]:
+    def quantize_order(self, symbol: str, amount: float, price: float) -> Optional[Tuple[float, float]]:
+        """Round (amount, price) to the instrument's precision and check its limits.
+
+        Returns (amount, price) ready to send, or None when the order would be
+        rejected (amount below min lot, notional below min cost, or non-positive
+        after rounding). Callers must NOT place an order when this returns None —
+        a rejected grid level used to raise inside the fill handler and drop the
+        whole position to IDLE.
+        """
+        try:
+            amt = float(self.exchange.amount_to_precision(symbol, amount))
+            px = float(self.exchange.price_to_precision(symbol, price))
+        except Exception as e:
+            logger.error(f"@QUANTIZE_ERROR@ {symbol}: {e}")
+            return None
+        if amt <= 0 or px <= 0:
+            logger.warning(f"@QUANTIZE_REJECT@ {symbol}: non-positive after rounding amount={amt} price={px}")
+            return None
+        market = {}
+        try:
+            market = (getattr(self.exchange, 'markets', None) or {}).get(symbol) or {}
+        except Exception:
+            market = {}
+        limits = market.get('limits') or {}
+        min_amt = safe_float((limits.get('amount') or {}).get('min'))
+        min_cost = safe_float((limits.get('cost') or {}).get('min'))
+        if min_amt > 0 and amt < min_amt:
+            logger.warning(f"@QUANTIZE_REJECT@ {symbol}: amount {amt} < min lot {min_amt}")
+            return None
+        if min_cost > 0 and amt * px < min_cost:
+            logger.warning(f"@QUANTIZE_REJECT@ {symbol}: notional {amt * px:.4f} < min cost {min_cost}")
+            return None
+        return amt, px
+
+    def amend_order(self, order_id: str, symbol: str, amount: float, price: float,
+                    side: str = 'buy') -> Optional[Dict]:
         """
         Amend existing order with Rate Limit protection
-        Retries on DDOS/Rate Limit errors with exponential backoff
+        Retries on DDOS/Rate Limit errors with exponential backoff.
+        `side` must match the resting order (it was hardcoded to 'buy' and used
+        for sell-side limit chases).
         """
         max_retries = 3
         base_delay = 0.5
@@ -668,13 +705,13 @@ class BybitClient:
             try:
                 amt_str = self.exchange.amount_to_precision(symbol, amount)
                 price_str = self.exchange.price_to_precision(symbol, price)
-                logger.debug(f"@AMEND_ORDER@ Amend {order_id} -> {symbol} @ ${price_str} (attempt {attempt + 1}/{max_retries})")
+                logger.debug(f"@AMEND_ORDER@ Amend {order_id} -> {symbol} {side} @ ${price_str} (attempt {attempt + 1}/{max_retries})")
                 
                 return self.exchange.amend_order(
                     id=order_id,
                     symbol=symbol,
                     type='limit',
-                    side='buy',
+                    side=side,
                     amount=float(amt_str),
                     price=float(price_str)
                 )

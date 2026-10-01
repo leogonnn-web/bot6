@@ -250,12 +250,11 @@ class BuyingStateMixin:
 
     def _handle_buying_state(self):
         try:
-            if not all(k in self.state_data for k in ('symbol', 'order_id', 'buy_time')):
+            if not all(k in self.state_data for k in ('symbol', 'buy_time')):
                 logger.error(f"@BUYING_STATE_CORRUPT@ state_data={self.state_data}")
                 self._transition_to_idle('buying_state_corrupt')
                 return
             symbol = self.state_data['symbol']
-            order_id = self.state_data['order_id']
             buy_time = self.state_data['buy_time']
             is_dry_run = self.state_data.get('is_dry_run', False)
             trading_config = self.config.get_trading_config()
@@ -264,23 +263,23 @@ class BuyingStateMixin:
             elapsed = time.time() - buy_time
             print(f"BUYING {symbol}: {elapsed:.1f}s / {timeout_sec}s @BUYING_MONITOR@", end='\r')
 
-            if is_dry_run:
-                # Check if this is a grid order
-                is_grid = self.state_data.get('is_grid_active', False)
+            # Grid: two orders (buy level + TP) live in hydra_net; same code for
+            # dry-run (virtual book) and live.
+            if self.state_data.get('is_grid_active', False):
+                self._handle_grid_buying(elapsed, timeout_sec)
+                return
 
-                if is_grid:
-                    # For grid orders: synchronize grid movement
-                    if self.state_data.get('is_grid_active', False):
-                        self._synchronize_grid_network()
-                    # Simulate fill after 2 seconds for grid
-                    if elapsed >= 2:
-                        logger.info(f"@DRY_RUN_GRID_FILL@ Virtual grid order filled for {symbol}")
-                        self._on_grid_level_filled({'id': order_id, 'status': 'closed', 'filled': self.state_data['amount'], 'average': self.state_data['buy_price']})
-                else:
-                    # Normal order: simulate fill after 1 second
-                    if elapsed >= 1:
-                        logger.info(f"@DRY_RUN_BUY_FILL@ Virtual buy order filled for {symbol}")
-                        self._on_buy_filled(symbol, self.state_data['amount'], self.state_data['buy_price'], is_dry_run=True)
+            order_id = self.state_data.get('order_id')
+            if not order_id:
+                logger.error(f"@BUYING_STATE_CORRUPT@ no order_id in non-grid BUYING: {self.state_data}")
+                self._transition_to_idle('buying_no_order_id')
+                return
+
+            if is_dry_run:
+                # Normal order: simulate fill after 1 second
+                if elapsed >= 1:
+                    logger.info(f"@DRY_RUN_BUY_FILL@ Virtual buy order filled for {symbol}")
+                    self._on_buy_filled(symbol, self.state_data['amount'], self.state_data['buy_price'], is_dry_run=True)
                 return
 
             # ---- Live: order status is exchange truth or "unknown", never guessed ----
@@ -298,14 +297,10 @@ class BuyingStateMixin:
             status = order.get('status')
             filled = safe_float(order.get('filled'))
             avg_price = safe_float(order.get('average') or order.get('price'))
-            is_grid = self.state_data.get('is_grid_active', False)
 
             def _accept_fill(qty: float, price: float, tag: str) -> None:
                 logger.info(f"@{tag}@ {symbol}: filled={qty} avg_price={price}")
-                if is_grid:
-                    self._on_grid_level_filled({**order, 'filled': qty, 'average': price})
-                else:
-                    self._on_buy_filled(symbol, qty, price, is_dry_run=False)
+                self._on_buy_filled(symbol, qty, price, is_dry_run=False)
 
             if status in ('closed', 'filled'):
                 if filled <= 0:

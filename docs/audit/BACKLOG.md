@@ -77,6 +77,13 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 
 ## Done
 
+- [x] 2026-10-01 **Phase 3 — grid (audit C2, plan §6 items 12–15).** `hydra_net.py` rewritten: level 0 = entry at ask,
+  separate `grid_buy_order_id` / `tp_order_id`, TP refresh cancels only the TP, TP fill during the grid is an exit
+  (`_on_grid_tp_filled`), knife/max-hold/level-rejected end the grid into IN_POSITION (`_end_grid_to_position`),
+  no phantom base quantity, `quantize_order` before every placement, `amend_order(..., side=)`, ATR cached 60 s.
+  Dry-run uses a virtual order book through the same `_grid_*` wrappers (the fake 2-second fill is gone).
+  Tests: `tests/test_grid_lifecycle.py` (12). Known gap: `_synchronize_grid_network` re-pricing still uses REST ATR every 60 s.
+
 - [x] 2026-09-09 `go-scalper/` → repo `triada-scalper`; `arb-engine/` → repo `triada-arb` (subtree split,
   binaries/dry-run dumps purged from their history).
 - [x] 2026-09-09 58 `tmp_*.py`/`tmp_*.sh` removed from repo root; `terraform.tfvars` untracked;

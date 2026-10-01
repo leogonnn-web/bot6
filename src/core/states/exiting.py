@@ -271,7 +271,7 @@ class ExitingStateMixin:
         # Re-peg: if the ask dropped below our resting price, cancel & re-post lower
         if chaser.get('repeg', True) and best_ask > 0 and best_ask < limit_price:
             try:
-                amended = self.order_manager.amend(order_id, symbol, amount, best_ask)
+                amended = self.order_manager.amend(order_id, symbol, amount, best_ask, side='sell')
                 if amended and amended.get('id'):
                     sd['exit_order_id'] = amended.get('id')
                 sd['chase_limit_price'] = best_ask

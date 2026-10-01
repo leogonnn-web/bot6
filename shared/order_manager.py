@@ -42,8 +42,9 @@ class ExecutionStrategy(abc.ABC):
         """Cancel an open order."""
 
     @abc.abstractmethod
-    def amend(self, order_id: str, symbol: str, amount: float, price: float) -> Optional[Dict[str, Any]]:
-        """Amend (modify) an open order in-place."""
+    def amend(self, order_id: str, symbol: str, amount: float, price: float,
+              side: str = 'buy') -> Optional[Dict[str, Any]]:
+        """Amend (modify) an open order in-place. `side` must match the order."""
 
 
 class SimpleLimitStrategy(ExecutionStrategy):
@@ -64,8 +65,9 @@ class SimpleLimitStrategy(ExecutionStrategy):
     def cancel(self, order_id: str, symbol: str) -> Dict[str, Any]:
         return self._client.cancel_order(order_id, symbol)
 
-    def amend(self, order_id: str, symbol: str, amount: float, price: float) -> Optional[Dict[str, Any]]:
-        return self._client.amend_order(order_id, symbol, amount, price)
+    def amend(self, order_id: str, symbol: str, amount: float, price: float,
+              side: str = 'buy') -> Optional[Dict[str, Any]]:
+        return self._client.amend_order(order_id, symbol, amount, price, side=side)
 
 
 class OrderManager:
@@ -101,8 +103,9 @@ class OrderManager:
     def cancel(self, order_id: str, symbol: str) -> Dict[str, Any]:
         return self._strategy.cancel(order_id, symbol)
 
-    def amend(self, order_id: str, symbol: str, amount: float, price: float) -> Optional[Dict[str, Any]]:
-        return self._strategy.amend(order_id, symbol, amount, price)
+    def amend(self, order_id: str, symbol: str, amount: float, price: float,
+              side: str = 'buy') -> Optional[Dict[str, Any]]:
+        return self._strategy.amend(order_id, symbol, amount, price, side=side)
 
     # -- internal --------------------------------------------------------------
     def _execute_with_metrics(self, side: str, fn) -> Dict[str, Any]:

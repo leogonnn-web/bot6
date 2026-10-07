@@ -202,6 +202,74 @@ def test_context_spread_is_none_for_synthetic_quotes():
     assert ctx['bid_ask_source'] == 'synthetic'
 
 
+class _ValidatingScanner(_Scanner):
+    """Enough of the bot for _validate_candidate to reach the dispatcher block."""
+
+    def __init__(self, dispatcher_enabled, trade_db):
+        super().__init__()
+        self.config.get_market_conditions_config = lambda: {}
+        self.exchange.fetch_ohlcv = lambda *a, **k: [[0, 1, 1, 1, 1, 1]] * 60
+        self.indicators_enabled = True
+        self.dispatcher_enabled = dispatcher_enabled
+        self.trade_db = trade_db
+        self.ws_tickers_cache = {'DOGE/USDT': {'bid': 0.99, 'ask': 1.01, 'bid_ask_source': 'book',
+                                               'bidVolume': 100.0, 'askVolume': 80.0}}
+
+    def _calculate_real_rvol(self, ohlcv):
+        return 3.0
+
+    def _check_btc_trend(self):
+        return True
+
+    def _calculate_btc_correlation(self, symbol):
+        return 1.0
+
+    def _add_to_rejected_cache(self, *a):
+        raise AssertionError("candidate must pass validation")
+
+
+@pytest.fixture
+def analyzer_ok(monkeypatch):
+    import indicators.matrix as m
+    fake = SimpleNamespace(complete_analysis=lambda **k: {
+        'status': 'ok', 'recommendation': 'BUY', 'confidence': 70.0})
+    monkeypatch.setattr(m, 'analyzer', fake, raising=False)
+
+
+CANDIDATE = {'symbol': 'DOGE/USDT', 'price': 1.0, 'drop': 4.5}
+
+
+def test_validate_candidate_with_dispatcher_off_returns_defaults(analyzer_ok):
+    """B-19: with the dispatcher disabled the candidate still validates (used to
+    raise NameError on obi_skew_val) and carries neutral features; nothing is logged."""
+    from unittest.mock import MagicMock
+    db = MagicMock()
+
+    res = _ValidatingScanner(dispatcher_enabled=False, trade_db=db)._validate_candidate(
+        dict(CANDIDATE), 'neutral', 0.0)
+
+    assert res['score'] == 0.0 and res['mode'] == 'normal'
+    df = res['dispatcher_features']
+    assert df['obi_skew'] == 0.0 and df['symbol'] == 'DOGE/USDT'
+    assert 'entry_ask' not in df
+    assert not db.log_dispatcher_features.called
+
+
+def test_validate_candidate_logged_row_equals_carried_features(analyzer_ok):
+    """B-19: the scan-time DB row and the dict carried into BUYING are one object."""
+    from unittest.mock import MagicMock
+    db = MagicMock()
+
+    res = _ValidatingScanner(dispatcher_enabled=True, trade_db=db)._validate_candidate(
+        dict(CANDIDATE), 'neutral', 0.0)
+
+    kwargs = db.log_dispatcher_features.call_args.kwargs
+    assert kwargs.pop('trade_id') == 0
+    assert kwargs == res['dispatcher_features']
+    assert kwargs['entry_ask'] == 1.01 and kwargs['bid_ask_source'] == 'book'
+    assert kwargs['obi_skew'] == pytest.approx(20 / 180)
+
+
 @pytest.mark.parametrize('trading, demo, expected', [
     ({'dry_run': True}, False, 'dry_run'),
     ({'dry_run': True}, True, 'dry_run'),

@@ -185,10 +185,13 @@ class ScanningStateMixin:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: corr={btc_correlation:.2f} < {correlation_threshold}")
             self._add_to_rejected_cache(candidate, "corr_low")
             return None
+        # Defaults = "no dispatcher opinion": what the candidate carries when the
+        # dispatcher is disabled or scoring failed.
         dispatcher_score = 0.0
         dispatcher_mode = "normal"
         obi_skew_val = 0.0
         context = {}
+        scored = False
         try:
             if getattr(self, 'dispatcher_enabled', False):
                 # obi_light: express OBI from top-1 bid/ask volumes in ticker cache
@@ -205,31 +208,34 @@ class ScanningStateMixin:
                     score=dispatcher_score, btc_1h=btc_change_1h,
                 )
                 context = self._candidate_context(ticker_data, bid_vol, ask_vol, dispatcher_mode)
-                # Phase 1: Log features to DB (feedback_loop = OFF)
-                has_db = hasattr(self, 'trade_db')
-                db_ok = bool(self.trade_db) if has_db else False
-                if has_db and db_ok:
-                    try:
-                        self.trade_db.log_dispatcher_features(
-                            trade_id=0,
-                            symbol=symbol,
-                            confidence=analysis.get('confidence', 0),
-                            rvol_spike=real_rvol,
-                            rvol_local=real_rvol,
-                            dump_depth=candidate['drop'],
-                            obi_skew=obi_skew_val,
-                            btc_1h=btc_change_1h,
-                            score=dispatcher_score,
-                            mode=dispatcher_mode,
-                            **context,
-                        )
-                        logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol}")
-                    except Exception as db_err:
-                        logger.error(f"@DISPATCHER_LOG_WARN@ {db_err}")
+                scored = True
             else:
                 logger.debug(f"@DISPATCHER_DISABLED@ {symbol} — dispatcher not enabled")
         except Exception as e:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: dispatcher exception: {e}")
+
+        # The one place the feature row is assembled (B-19): the scan-time DB row
+        # and the dict carried to the trade-linked rows in buying.py / bot.py
+        # are the same object, so they cannot drift apart.
+        dispatcher_features = {
+            'symbol': symbol,
+            'confidence': analysis.get('confidence', 0),
+            'rvol_spike': real_rvol,
+            'rvol_local': real_rvol,
+            'dump_depth': candidate['drop'],
+            'obi_skew': obi_skew_val,
+            'btc_1h': btc_change_1h,
+            'score': dispatcher_score,
+            'mode': dispatcher_mode,
+            **context,
+        }
+        # Phase 1: Log features to DB (feedback_loop = OFF)
+        if scored and getattr(self, 'trade_db', None):
+            try:
+                self.trade_db.log_dispatcher_features(trade_id=0, **dispatcher_features)
+                logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol}")
+            except Exception as db_err:
+                logger.error(f"@DISPATCHER_LOG_WARN@ {db_err}")
         return {
             'symbol': symbol,
             'price': price_now,
@@ -238,20 +244,7 @@ class ScanningStateMixin:
             'drop': candidate['drop'],
             'rvol': real_rvol,
             'confidence': analysis.get('confidence', 0),
-            'dispatcher_features': {
-                'symbol': symbol,
-                'confidence': analysis.get('confidence', 0),
-                'rvol_spike': real_rvol,
-                'rvol_local': real_rvol,
-                'dump_depth': candidate['drop'],
-                'obi_skew': obi_skew_val,
-                'btc_1h': btc_change_1h,
-                'score': dispatcher_score,
-                'mode': dispatcher_mode,
-                # Carried to the trade-linked rows logged in buying.py / bot.py
-                # so every row for one candidate shares the same context.
-                **context,
-            }
+            'dispatcher_features': dispatcher_features,
         }
 
     def _candidate_context(self, ticker_data: dict, bid_vol: float,

@@ -30,24 +30,37 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [x] B-06 `shared/utils.py:116-212` — `ProfitManager`, `HealthChecker`, `SoundNotifier` unused;
   `paths.py:12-13` `V17_CONFIG`, `SESSION_PROFIT_FILE` unused. Done 2026-09-21 (TZ-06): classes +
   `get_session_profit` removed with now-unused imports (`json`, `os`, `time`, `logger`, `paths`).
-- [ ] B-07 `archive/scanner_legacy.py`, root-level `analyze_entry.py`, `compare_metrics.py`,
+- [x] B-07 `archive/scanner_legacy.py`, root-level `analyze_entry.py`, `compare_metrics.py`,
   `compare_logs.ps1`, `daily_report.csv`, `trades.db` (root copy), `HYDRA_MATH_ANALYSIS.md`,
   `TRADING_TEST_RESULTS.md`, `roadmap.md` — decide keep/move to `docs/` or `scripts/`.
+  Done 2026-10-07 (TZ-09): scripts → `scripts/analysis/`, history docs + `archive/` → `docs/history/`,
+  `grafana_trade_panels.json` → `monitoring/`, `upload_to_github.ps1` removed; `daily_report.csv`
+  untracked (bot still writes it at runtime) and `/trades.db`, `/daily_report.csv` gitignored
+  (root `trades.db` was never tracked). Note: `scripts/analysis/compare_logs.ps1` hardcodes a local
+  Windows path and `analyze_entry.py` the container DB path (B-13 territory).
 - [x] B-08 `breakeven.py:41-42` computes a fee-aware multiplier that is immediately overwritten at `:44`
   (functional bug H8 is in the fix plan; the dead lines go here). Done 2026-09-22 (TZ-05): the `1.001`
   overwrite and the duplicate `price_to_precision` call removed; the fee-aware price is the one placed.
-- [ ] B-18 The same `buy_price * 1.001` breakeven price survives in `in_position.py:401`
+- [x] B-18 The same `buy_price * 1.001` breakeven price survives in `in_position.py:401`
   (`_execute_partial_tp`, re-order of the remaining position) — below the 0.2% round-trip fee, so the
   "breakeven" leg exits at a loss. Found during TZ-05; out of that TZ's scope (п.4 named only
   `breakeven.py`). Fix by reusing the fee-aware multiplier, ideally extracted into one helper.
+  Done 2026-10-07: `BreakevenMixin._breakeven_price(symbol, buy_price)` is the single helper used by
+  `_set_breakeven` and the partial-TP remainder; test `test_partial_tp_remainder_uses_fee_aware_breakeven`.
 
-- [ ] B-19 `scanning.py` `_validate_candidate` referenced `obi_skew_val` in its return dict while
+- [x] B-19 `scanning.py` `_validate_candidate` referenced `obi_skew_val` in its return dict while
   the variable is only bound inside `if dispatcher_enabled:` — with the dispatcher off every
   validated candidate raised `NameError` outside the surrounding try. Found during TZ-12A;
   worked around by initialising `obi_skew_val = 0.0` / `context = {}` up front, but the real fix is
   to build the `dispatcher_features` dict in one place instead of re-listing the keys.
-- [ ] B-20 `docs/bot_map.md` §4.5/§7.2 still shows the pre-TZ-12A `dispatcher_features` DDL
+  Done 2026-10-07: the dict is assembled once after scoring; the scan-time DB row is
+  `log_dispatcher_features(trade_id=0, **dispatcher_features)` and the same dict is returned.
+  Tests cover dispatcher off (neutral features, no row) and on (row == carried dict).
+  Still re-listed: the trade-linked rows in `buying.py`, `hydra_net.py`, `bot.py` (`df.get(...)` per key).
+- [x] B-20 `docs/bot_map.md` §4.5/§7.2 still shows the pre-TZ-12A `dispatcher_features` DDL
   (no `spread_pct`, `bid_ask_source`, `entry_ask`, `source`, ...). Out of TZ-12A's file scope.
+  Done 2026-10-07: §4.5 DDL synced with `models.py`; §7.1 `trades` DDL corrected too (had a
+  non-existent `mode`, lacked `confidence`).
 
 ## Structure
 
@@ -56,16 +69,28 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [ ] B-10 `print(..., end='\r')` progress lines in production handlers (`in_position.py:51`,
   `buying.py:205`, `exiting.py:32`, `limits.py:32,49`, `bot.py:810`) — replace with logger/metrics.
 - [ ] B-11 `metrics.py:208` trailing `import json`; `bot.py:846` in-function `import numpy`.
-- [ ] B-12 Pydantic schema for the whole config with `extra='forbid'` (`config_models.py:43,73,89-132`
+- [x] B-12 Pydantic schema for the whole config with `extra='forbid'` (`config_models.py:43,73,89-132`
   currently validate only `trading`/`hydra_net` with `extra='allow'`).
+  Done 2026-10-07 (TZ-07): every section has a model, all except `trading`/`hydra_net` are
+  `extra='forbid'` (incl. `exchange`); unknown top-level section → `unknown section '<name>'`.
+  Non-core sections are re-emitted with `exclude_unset` so `.get(k, default)` call sites see no
+  injected keys. Remaining: inventory + forbid for `trading`/`hydra_net`.
+  **Operator:** the server `config.json` differs from the repo one — validate it before deploying
+  (`python -c "import json,sys; sys.path.insert(0,'shared'); from config_models import validate_config; validate_config(json.load(open('<path>')))"`).
 - [ ] B-13 `tools/*.sh` and `tools/*.py` — several hardcode `/app/shared/state/trades.db`; unify on
   `shared/paths.py`.
 
 ## Infra / hygiene
 
-- [ ] B-14 `Dockerfile` runs as root (no `USER`); add a non-root user once volume permissions are sorted.
-- [ ] B-15 Grafana default password `triada2024` in `docker-compose.yml:91` — move to `.env`
+- [x] B-14 `Dockerfile` runs as root (no `USER`); add a non-root user once volume permissions are sorted.
+  Done 2026-10-07 (TZ-08): `USER hydra` (uid 10001) + `user: "10001:10001"` in compose; `/app/logs`,
+  `/app/shared/state` pre-created and chowned. `docker build` not run locally (no Docker daemon).
+  **Operator:** an existing root-owned `shared-data` volume must be chowned once (see `DEPLOY.md`).
+- [x] B-15 Grafana default password `triada2024` in `docker-compose.yml:91` — move to `.env`
   (`GRAFANA_PASSWORD` is already read; drop the fallback).
+  Done 2026-10-07 (TZ-08): `${GRAFANA_PASSWORD:?...}`; `docker compose config` fails without it.
+  Note: Grafana only applies the env password on first init of `grafana-data`; an existing volume
+  keeps its stored password (`grafana-cli admin reset-admin-password` to rotate).
 - [x] B-16 Docker healthcheck + `restart: unless-stopped` + in-process `HealthChecker` SIGTERM + external
   watchdog = four overlapping supervisors; decide on one owner (audit H2/H3, plan Phase 4 §17).
   Done 2026-09-22 (TZ-04): the external watchdog owns restart; `HealthChecker` only reports

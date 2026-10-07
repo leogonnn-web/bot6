@@ -98,3 +98,7 @@ terraform/terraform.exe
 # One-off diagnostic scripts must not accumulate in the repo root again
 /tmp_*.py
 /tmp_*.sh
+
+# Local copies/reports in the root (live DB is shared/state/trades.db)
+/trades.db
+/daily_report.csv

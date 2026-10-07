@@ -231,7 +231,7 @@ triada/
 ├── .env                             # API keys (DO NOT COMMIT)
 ├── .env.example                     # Template for new devs
 ├── hot_symbols.txt                  # Scanner output (live symbol list)
-├── daily_report.csv                 # CSV trade report generator
+├── daily_report.csv                 # CSV trade report written at runtime (gitignored)
 └── triada.tar.gz                    # Deployment artifact
 ```
 

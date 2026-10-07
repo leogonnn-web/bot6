@@ -11,22 +11,29 @@ from indicators.matrix import ATRAnalyzer
 
 
 class BreakevenMixin:
+    def _breakeven_price(self, symbol: str, buy_price: float) -> float:
+        """Exchange-precision sell price that covers the round-trip fees.
+
+        buy_price * (1 + taker + maker + 0.0002). The single source for every
+        "breakeven" order (full position and the remainder after a partial TP).
+        """
+        try:
+            market_info = self.exchange.exchange.market(symbol)
+            taker_fee = safe_float(market_info.get('taker', 0.001))
+            maker_fee = safe_float(market_info.get('maker', 0.001))
+        except Exception as e:
+            logger.debug(f"@FEE_FALLBACK@ Failed to read market fees: {e}")
+            taker_fee, maker_fee = 0.001, 0.001
+
+        breakeven_multiplier = 1.0 + (taker_fee + maker_fee) + 0.0002
+        return float(self.exchange.exchange.price_to_precision(symbol, buy_price * breakeven_multiplier))
+
     def _set_breakeven(self):
         try:
             symbol = self.state_data['symbol']
             trading_config = self.config.get_trading_config()
             is_dry_run = trading_config.get('dry_run', False)
             order_id = self.state_data.get('order_id')
-
-            try:
-                market_info = self.exchange.exchange.market(symbol)
-                taker_fee = safe_float(market_info.get('taker', 0.001))
-                maker_fee = safe_float(market_info.get('maker', 0.001))
-            except Exception as e:
-                logger.debug(f"@FEE_FALLBACK@ Failed to read market fees: {e}")
-                taker_fee, maker_fee = 0.001, 0.001
-
-            breakeven_multiplier = 1.0 + (taker_fee + maker_fee) + 0.0002
 
             # Отменяем ордер только если это не dry_run и order_id существует
             if not is_dry_run and order_id and not order_id.startswith('virtual_'):
@@ -36,10 +43,8 @@ class BreakevenMixin:
                 except Exception as cancel_err:
                     logger.warning(f"@BREAKEVEN_CANCEL_WARN@ Failed to cancel order {order_id}: {cancel_err}")
 
-            buy_price = self.state_data['buy_price']
             amount = self.state_data.get('amount', 0)
-            raw_price = buy_price * breakeven_multiplier
-            breakeven_price = float(self.exchange.exchange.price_to_precision(symbol, raw_price))
+            breakeven_price = self._breakeven_price(symbol, self.state_data['buy_price'])
             amount = float(self.exchange.exchange.amount_to_precision(symbol, amount))
 
             if is_dry_run:

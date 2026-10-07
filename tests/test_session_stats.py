@@ -175,6 +175,22 @@ def test_breakeven_amount_goes_through_precision():
     assert args[1] == pytest.approx(3.5)
 
 
+def test_partial_tp_remainder_uses_fee_aware_breakeven():
+    """B-18: after a partial TP the remainder re-order on a breakeven position
+    must use the same fee-aware price as _set_breakeven, not buy * 1.001."""
+    bot = _breakeven_bot(taker=0.001, maker=0.001, buy_price=100.0, amount=4.0)
+    bot.state_data["is_breakeven"] = True
+    bot.order_manager.sell.side_effect = [{"id": "ptp1"}, {"id": "rest1"}]
+
+    bot._execute_partial_tp("BTC/USDT", 101.0, 50.0, is_dry_run=False)
+
+    (_, _, ptp_price), (_, rest_amount, rest_price) = (c.args for c in bot.order_manager.sell.call_args_list)
+    assert ptp_price == pytest.approx(101.0)
+    assert rest_amount == pytest.approx(2.0)
+    assert rest_price == pytest.approx(100.22)
+    assert bot.state_data["order_id"] == "rest1"
+
+
 # ------------------------------------------------- partial TP booked on fill
 def _partial_tp_bot(order):
     """Live bot with a resting partial-TP order; `order` is fetch_order's answer."""

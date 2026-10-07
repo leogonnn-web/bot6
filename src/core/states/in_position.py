@@ -398,7 +398,7 @@ class InPositionStateMixin:
 
             # Re-create sell order for remaining position at breakeven or original TP
             if self.state_data.get('is_breakeven', False):
-                breakeven_price = self.state_data['buy_price'] * 1.001
+                breakeven_price = self._breakeven_price(symbol, self.state_data['buy_price'])
                 new_order = self.order_manager.sell(symbol, remaining_amount, breakeven_price)
                 self.state_data['order_id'] = new_order['id']
                 logger.info(f"@PARTIAL_REORDER@ Breakeven order for remaining: {new_order['id']}")

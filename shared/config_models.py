@@ -6,27 +6,27 @@ Design notes
 * Goal: catch type errors / out-of-range values BEFORE the trading loop starts,
   so the bot fails fast with a clear log message instead of crashing later
   inside a hot path with cryptic stack traces.
-* Scope: only `trading`, `hydra_net` and `exchange` sections are validated, as
-  requested by the spec. Everything else (indicators, scanner,
-  market_conditions, ...) is passed through untouched.
-* `extra='allow'` is critical: the real JSON has ~25+ fields per section, but
-  the spec only requires us to type-check a handful. Forbidding extras would
-  break every existing caller that relies on `trading_config.get('foo', def)`.
+* Scope: every top-level section has a model (`_SECTIONS`); an unknown
+  top-level section is an error. All sections except `trading`/`hydra_net`
+  use `extra='forbid'`, so a typo in a key fails at startup.
+* `trading`/`hydra_net` keep `extra='allow'`: they still carry ~25
+  undocumented fields read via `trading_config.get('foo', def)`; switching
+  them to forbid needs an inventory first (BACKLOG B-12).
 * The validators return *dicts* (via `model_dump`) to keep the existing
   Config public API (`get_trading_config()` returns dict) unchanged.
 
 Public entry point
 ------------------
 `validate_config(raw_config: dict) -> dict`
-  - Returns a NEW dict with the same shape as `raw_config`, but with
-    `trading` and `hydra_net` re-emitted from validated Pydantic models.
+  - Returns a NEW dict with the same shape as `raw_config`, every section
+    re-emitted from its validated Pydantic model.
   - Raises `ConfigValidationError` (subclass of ValueError) on failure.
 """
 from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 
 class ConfigValidationError(ValueError):
@@ -86,7 +86,13 @@ class HydraNetConfig(BaseModel):
     min_order_size_usdt: float = Field(gt=0.0, description="Minimum order size in USDT")
 
 
-class ExchangeConfig(BaseModel):
+class _Strict(BaseModel):
+    """Base for fully-specified sections: an unknown key is a typo, not a feature."""
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ExchangeConfig(_Strict):
     """Schema for the `exchange` section.
 
     `demo_trading` selects Bybit Demo Trading (api-demo.bybit.com): the live
@@ -94,28 +100,177 @@ class ExchangeConfig(BaseModel):
     from BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET.
     """
 
-    model_config = ConfigDict(extra='allow')
-
     name: str = Field(default='bybit', description="Exchange id (ccxt)")
     demo_trading: bool = Field(default=False, description="Use Bybit Demo Trading endpoint")
 
 
+class WebsocketConfig(_Strict):
+    enabled: bool = True
+    reconnect_interval_sec: float = Field(default=5, gt=0)
+    max_reconnect_attempts: int = Field(default=10, ge=0)
+
+
+class MetricsConfig(_Strict):
+    port: int = Field(default=9090, ge=1, le=65535)
+
+
+class CacheConfig(_Strict):
+    ticker_ttl: float = Field(default=2, ge=0)
+    balance_ttl: float = Field(default=5, ge=0)
+    ohlcv_ttl: float = Field(default=10, ge=0)
+
+
+class ApiRetryConfig(_Strict):
+    max_retries: int = Field(default=3, ge=0)
+    retry_delay: float = Field(default=0.5, ge=0)
+    backoff_factor: float = Field(default=2.0, ge=1.0)
+
+
+class ScannerConfig(_Strict):
+    enabled: bool = True
+    file: str = 'hot_symbols.txt'
+    cache_ttl: float = Field(default=600, ge=0)
+    use_priority: bool = True
+
+
+class IndicatorsConfig(_Strict):
+    enabled: bool = True
+    rsi_period: int = Field(default=14, ge=1)
+    rsi_oversold: float = Field(default=30, ge=0, le=100)
+    rsi_overbought: float = Field(default=70, ge=0, le=100)
+    ema_fast: int = Field(default=9, ge=1)
+    ema_slow: int = Field(default=21, ge=1)
+    macd_fast: int = Field(default=12, ge=1)
+    macd_slow: int = Field(default=26, ge=1)
+    macd_signal: int = Field(default=9, ge=1)
+    min_signal_score: float = Field(default=2, ge=0)
+
+
+class StochasticConfig(_Strict):
+    enabled: bool = True
+    period: int = Field(default=14, ge=1)
+    k_smooth: int = Field(default=3, ge=1)
+    d_smooth: int = Field(default=3, ge=1)
+
+
+class SignalWeights(_Strict):
+    rsi: float = 2.0
+    ema: float = 2.0
+    macd: float = 1.0
+    stochastic: float = 3.0
+    ichimoku: float = 2.0
+    volume_poc: float = 1.5
+
+
+class SignalOptimizerConfig(_Strict):
+    min_confidence_threshold: float = Field(default=50, ge=0, le=100)
+    strong_buy_threshold: Optional[float] = Field(default=None, ge=0, le=100)
+    use_conflict_detection: bool = True
+    volatility_adjusted: bool = True
+    signal_weights: SignalWeights = Field(default_factory=SignalWeights)
+
+
+class BtcFilterConfig(_Strict):
+    enabled: bool = False
+    symbol: str = 'BTC/USDT'
+    lookback_minutes: int = Field(default=5, ge=1)
+    max_drop_pct: float = Field(default=0.5, ge=0)
+
+
+class MarketConditionsConfig(_Strict):
+    btc_trend_detection: bool = True
+    volatility_adjustment: bool = True
+    trading_session_adjustment: bool = False
+    high_volatility_threshold: float = Field(default=1.5, ge=0)
+    low_volatility_threshold: float = Field(default=0.7, ge=0)
+    btc_correlation_filter: bool = False
+    btc_correlation_period: int = Field(default=24, ge=1)
+    btc_correlation_threshold: float = Field(default=0.5, ge=-1.0, le=1.0)
+    btc_filter: Optional[BtcFilterConfig] = None
+
+
+class ToxicFlowConfig(_Strict):
+    """Keys mirror `core.toxic_flow.DEFAULTS` plus the `enabled` switch."""
+
+    enabled: bool = True
+    sweep_window_sec: float = Field(default=3.0, gt=0)
+    sweep_min_trades: int = Field(default=10, ge=0)
+    sweep_sell_pct_min: float = Field(default=0.85, ge=0, le=1)
+    sweep_buy_pct_max: float = Field(default=0.10, ge=0, le=1)
+    sweep_consec_down_min: int = Field(default=3, ge=0)
+    large_print_size_ratio: float = Field(default=5.0, gt=0)
+    large_print_warmup: int = Field(default=100, ge=0)
+    cooldown_sec: float = Field(default=600.0, ge=0)
+    unlock_max_trades: int = Field(default=30, ge=0)
+    require_obi_unlock: bool = False
+
+
+class DynamicMinScoreConfig(_Strict):
+    enabled: bool = False
+    base: float = 1.0
+    btc_bearish_penalty: float = 0.5
+    btc_crash_penalty: float = 1.0
+    flet_bonus: float = -0.3
+
+
+class DispatcherConfig(_Strict):
+    enabled: bool = True
+    feedback_loop: bool = False
+    min_score_for_entry: float = 1.0
+    learning_rate: float = Field(default=0.02, ge=0)
+    dynamic_min_score: Optional[DynamicMinScoreConfig] = None
+
+
+class ScannerProtectionConfig(_Strict):
+    btc_crash_3m_pct: float = Field(default=-1.5, le=0)
+    btc_crash_15m_pct: float = Field(default=-2.5, le=0)
+    atr_spike_multiplier: float = Field(default=3.5, gt=0)
+    min_orderbook_liquidity_pct: float = Field(default=40.0, ge=0, le=100)
+    cooldown_freeze_minutes: float = Field(default=30, ge=0)
+
+
+_SYMBOLS = TypeAdapter(List[str])
+
+
+# Section name -> model. `trading` / `hydra_net` keep `extra='allow'` (they
+# still carry undocumented fields); every other section is strict. A
+# top-level key absent from this map is rejected as an unknown section.
+_SECTIONS: dict[str, type[BaseModel]] = {
+    'trading': TradingConfig,
+    'hydra_net': HydraNetConfig,
+    'exchange': ExchangeConfig,
+    'websocket': WebsocketConfig,
+    'metrics': MetricsConfig,
+    'cache': CacheConfig,
+    'api_retry': ApiRetryConfig,
+    'scanner': ScannerConfig,
+    'indicators': IndicatorsConfig,
+    'stochastic': StochasticConfig,
+    'signal_optimizer': SignalOptimizerConfig,
+    'market_conditions': MarketConditionsConfig,
+    'toxic_flow': ToxicFlowConfig,
+    'dispatcher': DispatcherConfig,
+    'scanner_protection': ScannerProtectionConfig,
+}
+
+
 def validate_config(raw_config: dict) -> dict:
-    """Validate `trading` and `hydra_net` sections of a fully-merged config dict.
+    """Validate every section of a fully-merged config dict.
 
     Args:
         raw_config: The dict produced after default-config + JSON deep-merge.
 
     Returns:
-        A dict identical to ``raw_config`` except that ``trading``,
-        ``hydra_net`` and ``exchange`` are re-emitted from the validated
-        Pydantic models.
-        Existing call sites (which use ``dict.get(key, default)``) keep working
-        unchanged.
+        A dict with the same shape as ``raw_config``. ``trading``, ``hydra_net``
+        and ``exchange`` are re-emitted in full from the validated models (as
+        before); the other sections are re-emitted with only the keys that were
+        actually set, so call sites relying on ``dict.get(key, default)`` see
+        exactly what the JSON said, just type-coerced.
 
     Raises:
         ConfigValidationError: aggregated, human-readable message containing
-        the offending section, field path, and reason.
+        the offending section, field path, and reason. An unknown top-level
+        section is reported as ``unknown section '<name>'``.
     """
     if not isinstance(raw_config, dict):
         raise ConfigValidationError(f"config must be a dict, got {type(raw_config).__name__}")
@@ -123,31 +278,31 @@ def validate_config(raw_config: dict) -> dict:
     out = dict(raw_config)
     errors: list[str] = []
 
-    trading_raw = raw_config.get('trading')
-    if isinstance(trading_raw, dict):
-        try:
-            out['trading'] = TradingConfig.model_validate(trading_raw).model_dump()
-        except ValidationError as exc:
-            errors.append(_format_pydantic_errors('trading', exc))
-    else:
+    if not isinstance(raw_config.get('trading'), dict):
         errors.append("section 'trading' is missing or not a dict")
 
-    hydra_raw = raw_config.get('hydra_net')
-    if isinstance(hydra_raw, dict):
+    for section, value in raw_config.items():
+        if section == 'symbols':
+            try:
+                out['symbols'] = _SYMBOLS.validate_python(value)
+            except ValidationError as exc:
+                errors.append(_format_pydantic_errors('symbols', exc))
+            continue
+        model = _SECTIONS.get(section)
+        if model is None:
+            errors.append(f"unknown section '{section}'")
+            continue
+        if not isinstance(value, dict):
+            if section != 'trading':
+                errors.append(f"section '{section}' must be a dict, got {type(value).__name__}")
+            continue
         try:
-            out['hydra_net'] = HydraNetConfig.model_validate(hydra_raw).model_dump()
+            validated = model.model_validate(value)
         except ValidationError as exc:
-            errors.append(_format_pydantic_errors('hydra_net', exc))
-    # NOTE: `hydra_net` is optional — bot can run without it (grid disabled).
-    # Only validate when present.
-
-    exchange_raw = raw_config.get('exchange')
-    if isinstance(exchange_raw, dict):
-        try:
-            out['exchange'] = ExchangeConfig.model_validate(exchange_raw).model_dump()
-        except ValidationError as exc:
-            errors.append(_format_pydantic_errors('exchange', exc))
-    # `exchange` is optional too; the in-code default supplies it.
+            errors.append(_format_pydantic_errors(section, exc))
+            continue
+        full = section in ('trading', 'hydra_net', 'exchange')
+        out[section] = validated.model_dump(exclude_unset=not full)
 
     if errors:
         raise ConfigValidationError("\n".join(errors))

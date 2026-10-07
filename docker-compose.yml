@@ -12,6 +12,7 @@ services:
       dockerfile: Dockerfile
     container_name: hydra-bot
     restart: unless-stopped
+    user: "10001:10001"   # = USER hydra in Dockerfile; state volume must be owned by it
     env_file: .env
     environment:
       - CAPITAL_STATE_FILE=/app/shared/state/capital_state.json
@@ -61,7 +62,7 @@ services:
       - prometheus
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-triada2024}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

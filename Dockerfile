@@ -27,6 +27,14 @@ COPY shared/ ./shared/
 COPY main.py .
 COPY pytest.ini .
 
+# Non-root runtime user (uid 10001 = `user:` in docker-compose.yml).
+# logs/ and shared/state/ are created here so the state volume is initialised
+# with the right owner on first mount.
+RUN useradd -r -u 10001 hydra && \
+    mkdir -p /app/logs /app/shared/state && \
+    chown -R hydra:hydra /app
+USER hydra
+
 # Health check: hit Prometheus metrics endpoint
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:9090/metrics')" || exit 1

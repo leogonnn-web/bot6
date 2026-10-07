@@ -79,7 +79,7 @@ docker compose restart hydra-bot
 
 # Update and rebuild
 git pull
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 
 # Stop everything
 docker compose down
@@ -98,7 +98,12 @@ Alerts are configured in `monitoring/alert_rules.yml`:
 
 ## Security Checklist
 - [ ] `.env` file has real API keys (never commit to git)
-- [ ] `GRAFANA_PASSWORD` changed from default
+- [ ] `GRAFANA_PASSWORD` set in `.env` (required — there is no default; `docker compose` fails without it)
+- [ ] After every image update: `docker compose up -d --build --remove-orphans`
+- [ ] `hydra-bot` runs as uid 10001 (non-root). On a host whose `shared-data` volume was created
+      by an older root image, chown it once before the first start:
+      `docker run --rm -v <project>_shared-data:/d alpine chown -R 10001:10001 /d`
+      (`docker volume ls` shows the exact name)
 - [ ] EC2 Security Group: 3000, 9090, 9092 restricted to `your_ip_cidr` (terraform/main.tf) — 9090 serves the unauthenticated `POST /maintenance`
 - [ ] `terraform apply` re-run after any SG change (the tf file alone changes nothing)
 - [ ] Bybit API key has IP whitelist + spot-only permissions

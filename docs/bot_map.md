@@ -27,7 +27,7 @@
 │  Go Arb Engine — вынесен в отдельный репо triada-arb (2026-09) │
 ├─────────────────────────────────────────────────────────────────┤
 │  Shared State (Docker volume triada_shared-data)                │
-│  ├─ trades.db       — SQLite (FIFO PnL, dispatcher_features)    │
+│  ├─ trades.db       — SQLite (net PnL, dispatcher_features)     │
 │  ├─ config.json     — runtime параметры                         │
 │  ├─ capital_state.json — текущий tier + max_grid_levels         │
 │  └─ hot_symbols.txt — выход scanner_v3                          │
@@ -152,6 +152,7 @@ else:              mode = 'conservative'    # чаще всего
 
 ```sql
 -- Таблица dispatcher_features (в trades.db на AWS)
+-- Источник истины: src/database/models.py (CREATE + миграция ALTER TABLE по DF_COLUMNS)
 CREATE TABLE dispatcher_features (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id INTEGER,        -- 0 = лог валидации до исполнения; >0 = исполненная позиция
@@ -166,7 +167,19 @@ CREATE TABLE dispatcher_features (
     score REAL,
     mode TEXT,
     profit REAL,             -- заполняется при закрытии сделки (NULL = ещё открыта)
-    take_profit_pct REAL
+    take_profit_pct REAL,
+    -- TZ-12A: ликвидность и правила выхода на момент сигнала (офлайн-разметка, TZ-12B).
+    -- Считаются один раз в сканере (_candidate_context) и переносятся во все строки кандидата.
+    spread_pct REAL,         -- (ask-bid)/ask*100; NULL если bid/ask не из стакана
+    bid_vol REAL,            -- объём лучшего bid (top-1)
+    ask_vol REAL,            -- объём лучшего ask (top-1)
+    turnover24h REAL,        -- оборот 24h, USDT
+    bid_ask_source TEXT,     -- 'book' | 'synthetic'
+    tp_pct REAL,             -- TP режима диспетчера (или trading.take_profit)
+    sl_pct REAL,             -- trading.panic_stop
+    hold_sec REAL,           -- trading.hard_exit_timeout_sec
+    entry_ask REAL,          -- ask на момент сигнала (цена входа для разметки); NULL без котировки
+    source TEXT              -- 'dry_run' | 'demo' | 'live'
 );
 -- trades: id, symbol, side, amount, price, timestamp, confidence, profit
 -- side: buy, buy_grid_complete, sell, sell_partial, sell_panic
@@ -269,20 +282,22 @@ else:               mode = 'bootstrap'
 
 ```sql
 CREATE TABLE trades (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT,
-    side TEXT,          -- 'buy', 'sell', 'buy_grid_complete'
+    side TEXT,          -- buy, buy_grid_complete, sell, sell_partial, sell_panic
     amount REAL,
     price REAL,
-    profit REAL,        -- PnL (для sell-записей)
     timestamp REAL,
-    mode TEXT           -- 'conservative' и т.д.
+    confidence REAL,
+    profit REAL DEFAULT 0.0  -- net PnL с комиссиями (для sell*-записей); источник session_profit
 );
 ```
 
 ### 7.2 Таблица `dispatcher_features`
 
-(см. раздел 4.5)
+Полная схема (включая колонки TZ-12A: `spread_pct`, `bid_vol`, `ask_vol`, `turnover24h`,
+`bid_ask_source`, `tp_pct`, `sl_pct`, `hold_sec`, `entry_ask`, `source`) — в разделе 4.5;
+источник истины — `src/database/models.py`.
 
 ### 7.3 Как подключиться к живой БД
 

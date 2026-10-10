@@ -96,13 +96,6 @@ class TradingBot(
             base_symbols=self.config.get_symbols(),
             scanner_integration=self.scanner_integration,
         )
-        # Restore session profit from DB so Grafana doesn't show 0 after restart
-        stats = self.trade_db.get_session_stats()
-        self.session_profit = float(stats.get('session_profit', 0.0))
-        METRICS.session_profit.set(self.session_profit)
-        if self.session_profit != 0.0:
-            logger.info(f"@RESTORE@ Session profit restored from DB: ${self.session_profit:.4f}")
-
         # Initialize price history - will be populated dynamically during scanning
         self.price_history = {}
 
@@ -130,6 +123,13 @@ class TradingBot(
         os.makedirs(state_dir, exist_ok=True)
         self.state_file = os.path.join(state_dir, "hydra_state.json")
         self._load_state()
+        # Session profit has ONE source: the profit column in trades.db, scoped to
+        # this session (trading.session_start_ts). Computed after _load_state so
+        # neither the state file nor an unscoped DB total can override it — the
+        # unscoped total made Grafana show months of old history at startup.
+        self.session_profit = self._session_profit_from_db()
+        METRICS.session_profit.set(self.session_profit)
+        logger.info(f"@RESTORE@ Session profit from DB since {self._session_start_ts():.0f}: ${self.session_profit:.4f}")
         if self.state != BotState.IDLE and self.state_data.get('symbol'):
             logger.info(f"@STATE_RESTORED@ Restored {self.state.name} for {self.state_data['symbol']} from state file")
         else:
@@ -251,8 +251,26 @@ class TradingBot(
         except Exception as e:
             logger.error(f"@STATE_SAVE_ERROR@ Failed to save state: {e}")
 
+    def _session_start_ts(self) -> float:
+        try:
+            return float(self.config.get_trading_config().get('session_start_ts', 0) or 0)
+        except Exception:
+            return 0.0
+
+    def _session_profit_from_db(self) -> float:
+        """Net session PnL from trades.db (profit column) since session_start_ts."""
+        try:
+            stats = self.trade_db.get_session_stats(self._session_start_ts())
+            return float(stats.get('session_profit', 0.0))
+        except Exception as e:
+            logger.error(f"@SESSION_PROFIT_ERROR@ {e}")
+            return 0.0
+
     def _load_state(self):
-        """Restore state_data from disk after container restart."""
+        """Restore state_data from disk after container restart.
+
+        session_profit is deliberately NOT restored from the file: trades.db is
+        the only source (see __init__)."""
         self.state = BotState.IDLE
         self.state_data = {}
         self.state_entry_time = time.time()
@@ -265,7 +283,6 @@ class TradingBot(
                 self.state = getattr(BotState, saved_state, BotState.IDLE)
                 self.state_data = data.get('state_data', {})
                 self.state_entry_time = data.get('state_entry_time', time.time())
-                self.session_profit = float(data.get('session_profit', 0.0))
                 # Clean up stale state if older than 24h
                 saved_at = data.get('saved_at', 0)
                 if time.time() - saved_at > 86400:
@@ -274,11 +291,6 @@ class TradingBot(
                     self.state_data = {}
                 else:
                     logger.info(f"@STATE_LOADED@ Recovered state {saved_state} from {self.state_file}")
-                    # Reset stale session_profit if no active position to avoid double accounting
-                    if self.state == BotState.IDLE:
-                        self.session_profit = 0.0
-                        self._save_state()
-                        logger.info("@STATE_CLEAN@ Session profit reset to 0 for fresh IDLE session")
                     # Validate: if symbol in state, verify we still hold position
                     if self.state_data.get('symbol'):
                         self._recover_from_exchange()
@@ -324,9 +336,7 @@ class TradingBot(
             logger.warning(f"@RECOVER_GHOST@ No open orders or {base} holdings for {symbol}. Resetting to IDLE.")
             self.state = BotState.IDLE
             self.state_data = {}
-            self.session_profit = 0.0
             self._save_state()
-            logger.info("@STATE_CLEAN@ Session profit reset to 0 after ghost recovery")
         except Exception as e:
             logger.error(f"@RECOVER_ERROR@ Exchange recovery failed: {e}")
 
@@ -550,13 +560,32 @@ class TradingBot(
             logger.error(f"@CB_ERROR@ circuit-breaker check failed: {e}")
             return False
 
+    def _apply_market_universe(self, markets: Dict) -> None:
+        """Drop configured symbols the exchange does not list as active spot markets.
+
+        One stale symbol (e.g. a delisted TON/USDT) makes ccxt's fetch_tickers
+        reject the whole batch and silently loses its WS subscription. When
+        `markets` is empty (exchange unreachable) nothing is filtered.
+        """
+        if not markets:
+            logger.warning("@MARKETS_UNAVAILABLE@ load_markets returned nothing; symbol list not filtered")
+            return
+        known = {
+            s for s, m in markets.items()
+            if (m or {}).get('spot', True) and (m or {}).get('active', True) is not False
+        }
+        dropped = self.symbol_manager.set_known_markets(known)
+        if dropped:
+            logger.warning(f"@SYMBOL_DELISTED@ {len(dropped)} configured symbol(s) not tradable on Bybit spot, dropped: {dropped}")
+        logger.info(f"@MARKET_UNIVERSE@ {len(known)} active spot markets; {len(self.symbol_manager.base_symbols)} base symbols kept")
+
     # ------------------------------------------------------------------
     # Main run loop + state dispatch
     # ------------------------------------------------------------------
     def run(self) -> None:
         try:
             logger.info("@START_SUCCESS@ HYDRA v17.0 STARTED")
-            self.exchange.load_markets()
+            self._apply_market_universe(self.exchange.load_markets())
 
             # WebSocket streaming with auto-reconnect
             ws_cfg = self.config.get_websocket_config()
@@ -564,7 +593,7 @@ class TradingBot(
                 ws_listener = self.exchange.ws_listener
                 ws_listener.reconnect_interval_sec = ws_cfg.get('reconnect_interval_sec', 5)
                 ws_listener.max_reconnect_attempts = ws_cfg.get('max_reconnect_attempts', 10)
-                if ws_listener.start(self.config.get_symbols()):
+                if ws_listener.start(self.symbol_manager.get_symbols(refresh_scanner=False)):
                     logger.info("@WS_MODE@ Using WebSocket real-time streaming")
                 else:
                     logger.warning("@WS_FALLBACK@ WebSocket init failed, using REST polling")
@@ -593,8 +622,12 @@ class TradingBot(
                     # Track state changes for stuck detection
                     if self.state != self._last_state:
                         self.state_entry_time = time.time()
+                        prev = self._last_state
                         self._last_state = self.state
-                        self._save_state()
+                        # IDLE<->SCANNING flips every tick and carries no position
+                        # data; persisting them rewrote hydra_state.json ~1/s.
+                        if not ({prev, self.state} <= {BotState.IDLE, BotState.SCANNING}):
+                            self._save_state()
 
                     # Self-diagnostic health check
                     self.health_checker.check()
@@ -629,7 +662,7 @@ class TradingBot(
                                 self.exchange.exchange.clear_caches()
                         except Exception as e:
                             logger.debug(f"@CACHE_CLEAR_WARN@ Failed to clear ccxt caches: {e}")
-                        stats = self.trade_db.get_session_stats()
+                        stats = self.trade_db.get_session_stats(self._session_start_ts())
                         self._generate_daily_csv_report(stats)
                         logger.info(
                             f"@STATS@ Session stats - Trades: {stats.get('total_trades', 0)}, "

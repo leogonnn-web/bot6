@@ -14,7 +14,7 @@ import os
 import re
 import time
 import logging
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 import sys
 
 # Add paths
@@ -89,6 +89,10 @@ class DynamicSymbolManager:
     def __init__(self, base_symbols: List[str], scanner_integration: ScannerIntegration):
         self.base_symbols = set(base_symbols)
         self.scanner = scanner_integration
+        # Symbols the exchange actually lists (set from load_markets). None = unknown,
+        # no filtering. One delisted symbol (TON/USDT, 2026-10) made the whole REST
+        # fetch_tickers call fail and the WS subscription for it was silently dropped.
+        self.known_markets: Optional[set] = None
         self.stats = {
             'total': 0,
             'from_scanner': 0,
@@ -96,10 +100,23 @@ class DynamicSymbolManager:
             'last_update': 0
         }
 
+    def set_known_markets(self, markets: set) -> List[str]:
+        """Restrict the symbol universe to `markets`. Returns the base symbols dropped."""
+        self.known_markets = set(markets)
+        dropped = sorted(s for s in self.base_symbols if s not in self.known_markets)
+        if dropped:
+            self.base_symbols -= set(dropped)
+        return dropped
+
+    def _filter_known(self, symbols: List[str]) -> List[str]:
+        if self.known_markets is None:
+            return symbols
+        return [s for s in symbols if s in self.known_markets]
+
     def get_symbols(self, refresh_scanner: bool = True) -> List[str]:
         """Get combined symbol list"""
         try:
-            scanner_symbols = self.scanner.read_symbols(force_refresh=refresh_scanner)
+            scanner_symbols = self._filter_known(list(self.scanner.read_symbols(force_refresh=refresh_scanner)))
 
             if scanner_symbols:
                 combined = list(scanner_symbols) + [

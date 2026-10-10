@@ -456,11 +456,13 @@ class BybitClient:
         self.ws_listener = WebSocketListener(self.api_key, self.secret)
     
     def load_markets(self) -> Dict:
-        """Load market specifications"""
+        """Load market specifications.
+
+        Public endpoint — works without API keys, so dry-run gets real lot/price
+        limits (quantize_order, _dust_threshold) and the delisted-symbol filter.
+        Returns {} only when the exchange is unreachable.
+        """
         try:
-            if not self.api_key or not self.secret:
-                logger.warning("@EXCHANGE_WARN@ No API keys, virtual mode")
-                return {}
             return self.exchange.load_markets()
         except Exception as e:
             logger.warning(f"@EXCHANGE_WARN@ Load markets failed: {e}")

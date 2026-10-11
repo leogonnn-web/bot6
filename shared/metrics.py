@@ -86,6 +86,14 @@ class _Metrics:
             'hydra_bot_state',
             'Current bot state (0=IDLE,1=SCANNING,2=BUYING,3=IN_POSITION,4=EXITING)',
         )
+        self.state_age_seconds = Gauge(
+            'hydra_state_age_seconds',
+            'Seconds since the bot entered its current state',
+        )
+        self.state_stuck = Gauge(
+            'hydra_state_stuck',
+            'Current state exceeds its config-derived max time (1=yes). Alert only, never a restart trigger',
+        )
         self.scan_cycle_total = Counter(
             'hydra_scan_cycles_total',
             'Total scan cycles executed',

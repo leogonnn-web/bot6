@@ -5,7 +5,7 @@ import os
 from typing import Dict
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
-from logger_setup import logger
+from logger_setup import logger, log_every
 from utils import safe_float
 from metrics import METRICS
 
@@ -261,7 +261,7 @@ class BuyingStateMixin:
             timeout_sec = trading_config.get('order_execution_timeout_sec', 60)
 
             elapsed = time.time() - buy_time
-            print(f"BUYING {symbol}: {elapsed:.1f}s / {timeout_sec}s @BUYING_MONITOR@", end='\r')
+            log_every('buying_monitor', 30, f"@BUYING_MONITOR@ {symbol}: {elapsed:.1f}s / {timeout_sec}s")
 
             # Grid: two orders (buy level + TP) live in hydra_net; same code for
             # dry-run (virtual book) and live.

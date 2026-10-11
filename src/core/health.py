@@ -26,6 +26,8 @@ class HealthChecker:
         self.max_consecutive_fails = 3
         self.health_history: List[Dict] = []
         self.max_history = 10
+        self.state_long_log_interval = 300  # seconds between @STATE_LONG@ lines
+        self._last_state_long_log = 0.0
 
     def check(self) -> Dict:
         """Run all health checks and return report"""
@@ -57,7 +59,14 @@ class HealthChecker:
         # 6. No critical errors looping
         report['checks']['error_loop'] = self._check_error_loop()
 
-        report['overall'] = all(report['checks'].values())
+        # state_stuck is informational: a restart cannot fix a long logical state
+        # (it is restored from hydra_state.json), it only interrupts a legitimate
+        # one — an open grid (up to hard_exit_timeout_sec) or exit_halted waiting
+        # for the operator. A hung process is caught by the heartbeat instead.
+        # Surfaced via @STATE_LONG@, hydra_state_stuck and the BotStateStuck alert.
+        stuck = not report['checks']['state_stuck']
+        METRICS.state_stuck.set(1.0 if stuck else 0.0)
+        report['overall'] = all(v for k, v in report['checks'].items() if k != 'state_stuck')
 
         if not report['overall']:
             self.consecutive_fails += 1
@@ -130,20 +139,43 @@ class HealthChecker:
     # ------------------------------------------------------------------
     # 4. State stuck detection
     # ------------------------------------------------------------------
+    def _state_limits(self) -> Dict:
+        """Max expected time per supervised state, derived from trading config.
+
+        BUYING covers an open grid and IN_POSITION a held position — both bounded
+        by hard_exit_timeout_sec. EXITING allows every exit attempt to time out.
+        """
+        try:
+            tc = (getattr(self.bot.config, 'config', {}) or {}).get('trading', {}) or {}
+            hard_exit = float(tc.get('hard_exit_timeout_sec', 1800))
+            order_timeout = float(tc.get('order_execution_timeout_sec', 60))
+            attempts = int(tc.get('max_exit_attempts', 5))
+        except Exception:
+            hard_exit, order_timeout, attempts = 1800.0, 60.0, 5
+        return {
+            BotState.BUYING: hard_exit + 300,
+            BotState.IN_POSITION: hard_exit + 300,
+            BotState.EXITING: order_timeout * (attempts + 1) + 300,
+        }
+
     def _check_state_stuck(self) -> bool:
         state = getattr(self.bot, 'state', None)
-        state_entry = getattr(self.bot, 'state_entry_time', 0)
-        if state in (BotState.IN_POSITION, BotState.BUYING, BotState.EXITING):
-            elapsed = time.time() - state_entry
-            max_time = {
-                BotState.BUYING: 300,
-                BotState.IN_POSITION: 3600,
-                BotState.EXITING: 300,
-            }.get(state, 600)
-            if elapsed > max_time:
-                logger.debug(f"Health: state {state} stuck for {elapsed:.0f}s")
-                return False
-        return True
+        max_time = self._state_limits().get(state)
+        if max_time is None:
+            return True
+        elapsed = time.time() - getattr(self.bot, 'state_entry_time', 0)
+        if elapsed <= max_time:
+            return True
+        now = time.time()
+        if now - self._last_state_long_log >= self.state_long_log_interval:
+            self._last_state_long_log = now
+            symbol = (getattr(self.bot, 'state_data', None) or {}).get('symbol')
+            halted = ' exit_halted' if (getattr(self.bot, 'state_data', None) or {}).get('exit_halted') else ''
+            logger.warning(
+                f"@STATE_LONG@ {state.name} {symbol or ''}{halted} for {elapsed:.0f}s > {max_time:.0f}s "
+                f"(informational: no restart, operator attention)"
+            )
+        return False
 
     # ------------------------------------------------------------------
     # 5. Capital check

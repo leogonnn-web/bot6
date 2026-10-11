@@ -67,15 +67,16 @@ groups:
 
   - name: hydra_bot_health
     rules:
-      # Bot stuck in same state for too long
+      # State older than its config-derived limit (health.py _state_limits).
+      # Alert for the operator only — the watchdog never restarts on this.
       - alert: BotStateStuck
-        expr: changes(hydra_bot_state[30m]) == 0 and hydra_bot_state != 0
-        for: 30m
+        expr: hydra_state_stuck == 1
+        for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Bot stuck in state {{ $value }} for 30m+"
-          description: "Bot state has not changed for 30 minutes. May indicate a hung order or network issue."
+          summary: "Bot state held longer than its config limit"
+          description: "See hydra_bot_state / hydra_state_age_seconds. Open grid past hard_exit, or exit_halted waiting for manual action — check @STATE_LONG@ in the bot log."
 
       # No scan cycles for 5 minutes
       - alert: ScanCyclesStopped

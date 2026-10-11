@@ -150,6 +150,19 @@ def test_fetch_ticker_error_is_none_not_zero_price(client):
     assert client.fetch_ticker('SHIB/USDT') is None
 
 
+# --------------------------------------------------------------- cancel_order
+def test_cancel_virtual_order_never_calls_exchange(client):
+    """Dry-run ids never existed on Bybit; cancelling them hit the API and failed
+    with 'requires apiKey' (stage-1 log, hard_exit of a virtual breakeven)."""
+    calls = []
+    client.exchange.cancel_order = lambda oid, sym: calls.append(oid)
+    for oid in ('virtual_breakeven_1791674876', 'virtual_sell_TP_2', 'virtual_tp_1'):
+        assert client.cancel_order(oid, 'MINA/USDT')['status'] == 'canceled'
+    assert calls == []
+    client.cancel_order('1234567890', 'MINA/USDT')
+    assert calls == ['1234567890']
+
+
 # ------------------------------------------------------- demo trading (TZ-11)
 class FakeExchangeFactory:
     """Stand-in for ccxt.bybit: records the config and demo switch."""

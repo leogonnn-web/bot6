@@ -650,7 +650,11 @@ class BybitClient:
             raise
     
     def cancel_order(self, order_id: str, symbol: str) -> Dict:
-        """Cancel order"""
+        """Cancel order. Dry-run ids (`virtual_*`) never existed on the exchange:
+        cancelled locally, no API call (it failed with 'requires apiKey')."""
+        if str(order_id or '').startswith('virtual_'):
+            logger.debug(f"@CANCEL_VIRTUAL@ {order_id} for {symbol}")
+            return {'id': order_id, 'symbol': symbol, 'status': 'canceled'}
         try:
             logger.info(f"@CANCEL_ORDER@ Cancel {order_id} for {symbol}")
             return self.exchange.cancel_order(order_id, symbol)

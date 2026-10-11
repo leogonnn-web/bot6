@@ -29,7 +29,6 @@ class RiskLimitsMixin:
             cooldown_min = trading_config.get('cooldown_after_loss_minutes', 30)
             if time.time() - self.last_loss_time < (cooldown_min * 60):
                 remaining = int((cooldown_min * 60) - (time.time() - self.last_loss_time))
-                print(f"Cooldown after loss. Remaining: {remaining}s @COOLDOWN@ ", end='\r')
                 logger.info(f"@RISK_COOLDOWN@ Cooldown active: {remaining}s remaining")
                 return False
             # Real-session scoping: exclude prior dry-run trades from live
@@ -46,7 +45,6 @@ class RiskLimitsMixin:
             max_day_trades = trading_config.get('max_trades_per_day', 5)
             logger.info(f"@RISK_CHECK@ Daily trades: {daily_trades}/{max_day_trades}")
             if daily_trades >= max_day_trades:
-                print(f"Daily trade limit reached ({daily_trades}/{max_day_trades}) @DAY_LIMIT@ ", end='\r')
                 logger.info(f"@RISK_LIMIT@ Daily limit reached: {daily_trades}/{max_day_trades}")
                 return False
             # ── Capital protection: max loss limit ──

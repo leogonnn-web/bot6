@@ -44,5 +44,21 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
+_last_emit: dict = {}
+
+
+def log_every(key: str, interval_sec: float, msg: str, level: int = logging.DEBUG) -> None:
+    """Log `msg` at most once per `interval_sec` for `key` (per-tick progress lines).
+
+    Replaces print(..., end='\\r') monitors, which glued thousands of characters
+    into one docker-log line and hid markers from grep.
+    """
+    import time
+    now = time.time()
+    if now - _last_emit.get(key, 0.0) >= interval_sec:
+        _last_emit[key] = now
+        logger.log(level, msg)
+
+
 # Export logger
-__all__ = ['logger']
+__all__ = ['logger', 'log_every']

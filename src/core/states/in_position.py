@@ -4,7 +4,7 @@ import sys
 import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
-from logger_setup import logger
+from logger_setup import logger, log_every
 from utils import safe_float, chase_deadline, exit_backstop_decision
 from metrics import METRICS
 
@@ -65,7 +65,7 @@ class InPositionStateMixin:
             move_to_breakeven = trading_config.get('move_to_breakeven', True)
             trailing_callback = trading_config.get('trailing_callback_pct', 0.5)
 
-            print(f"Position {symbol}: {change_percent:.2f}% | Time: {int(elapsed)}s @MONITOR_WS@", end='\r')
+            log_every('position_monitor', 30, f"@MONITOR_WS@ {symbol}: {change_percent:.2f}% | Time: {int(elapsed)}s")
             is_sl_hit = change_percent <= -trading_config['panic_stop']
             is_partial_tp_hit = partial_tp_enabled and change_percent >= partial_tp_activation
 

@@ -66,8 +66,12 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 
 - [ ] B-09 Replace per-module `sys.path.append(... 'shared')` with a real package + one `PYTHONPATH`
   (`pyproject.toml`); resolves the `database` name collision (B-04).
-- [ ] B-10 `print(..., end='\r')` progress lines in production handlers (`in_position.py:51`,
+- [x] B-10 `print(..., end='\r')` progress lines in production handlers (`in_position.py:51`,
   `buying.py:205`, `exiting.py:32`, `limits.py:32,49`, `bot.py:810`) — replace with logger/metrics.
+  Done 2026-10-11: monitors → `log_every(key, 30s)` at DEBUG (`logger_setup.py`), `limits.py` prints
+  dropped (a logger.info line already sat next to each), `@TIME_BLOCK@` → INFO every 5 min. Found in
+  the stage-1 dry-run: the `\r` lines glued thousands of chars into one docker-log line.
+  Guard test: `test_no_carriage_return_prints_in_src`.
 - [ ] B-11 `metrics.py:208` trailing `import json`; `bot.py:846` in-function `import numpy`.
 - [x] B-12 Pydantic schema for the whole config with `extra='forbid'` (`config_models.py:43,73,89-132`
   currently validate only `trading`/`hydra_net` with `extra='allow'`).
@@ -99,6 +103,19 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [x] B-17 `tests/test_health.py:83,91` set `bot.state` to strings while production uses `BotState` Enum —
   test must use the Enum once `health.py:134` is fixed. Done 2026-09-22 (TZ-04): `_check_state_stuck`
   compares Enum members; `DummyBot` and all assignments use `BotState.*`.
+
+- [x] B-21 Watchdog restarted a healthy bot 4× in the first stage-1 dry-run (2026-10-10): an open grid
+  stays in BUYING up to `hard_exit_timeout_sec` (1800 s), `health.py` called BUYING > 300 s "stuck" →
+  `health_status=0` → restart every ~7 min until the grid closed. `exit_halted` (EXITING forever, by
+  design) would loop the same way. A restart cannot fix a logical state (restored from
+  `hydra_state.json`); a hung process is the heartbeat's job.
+  Done 2026-10-11: `state_stuck` is excluded from `overall`; limits derived from config (BUYING /
+  IN_POSITION = `hard_exit_timeout_sec + 300`, EXITING = `order_execution_timeout_sec × (max_exit_attempts+1) + 300`);
+  over the limit → `@STATE_LONG@` (once per 5 min) + `hydra_state_stuck=1` → alert `BotStateStuck`.
+  New gauges `hydra_state_age_seconds`; `hydra_bot_state` is now actually set (it never was — the old
+  `BotStateStuck` rule and the dashboard panel read an absent series).
+- [x] B-22 Dry-run cancelled `virtual_*` order ids through the real API (`@ORDER_ERROR@ ... requires "apiKey"`).
+  Done 2026-10-11: `BybitClient.cancel_order` short-circuits `virtual_*` ids — covers all nine call sites.
 
 ## Done
 

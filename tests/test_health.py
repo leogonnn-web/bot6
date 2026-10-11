@@ -81,7 +81,7 @@ def test_database_persistent_failure():
 def test_state_stuck_buying():
     bot = DummyBot()
     bot.state = BotState.BUYING
-    bot.state_entry_time = time.time() - 400  # 400s > 300s limit
+    bot.state_entry_time = time.time() - 2200  # > hard_exit 1800 + 300
     hc = HealthChecker(bot)
     assert hc._check_state_stuck() is False
 
@@ -95,12 +95,95 @@ def test_state_not_stuck_scanning():
 
 
 def test_state_stuck_buying_just_over_limit():
-    """Enum comparison must actually fire: BUYING for 301s > 300s limit."""
+    """Enum comparison must actually fire: limit comes from hard_exit_timeout_sec."""
     bot = DummyBot()
+    bot.config.config = {'trading': {'dry_run': True, 'hard_exit_timeout_sec': 600}}
     bot.state = BotState.BUYING
-    bot.state_entry_time = time.time() - 301
+    bot.state_entry_time = time.time() - 901   # > 600 + 300
     hc = HealthChecker(bot)
     assert hc._check_state_stuck() is False
+    bot.state_entry_time = time.time() - 899
+    assert hc._check_state_stuck() is True
+
+
+# ---- state_stuck is informational: never degrades overall health (stage-1 stop,
+# ---- 2026-10-11: an open grid in BUYING > 300s made the watchdog restart the bot
+# ---- every ~7 min; exit_halted in EXITING would loop the same way).
+def _healthy_bot():
+    bot = DummyBot()
+    now = time.time()
+    bot.ws_tickers_cache = {'BTC/USDT': {'timestamp': now}, 'ETH/USDT': {'timestamp': now}}
+    bot.state_data = {}
+    return bot
+
+
+def test_open_grid_within_hard_exit_is_healthy():
+    bot = _healthy_bot()
+    bot.config.config = {'trading': {'dry_run': True, 'hard_exit_timeout_sec': 1800}}
+    bot.state = BotState.BUYING
+    bot.state_entry_time = time.time() - 1000
+    hc = HealthChecker(bot)
+    report = hc.check()
+    assert report['checks']['state_stuck'] is True
+    assert report['overall'] is True
+
+
+def test_long_buying_logs_state_long_but_stays_healthy(caplog):
+    bot = _healthy_bot()
+    bot.state = BotState.BUYING
+    bot.state_data = {'symbol': 'MINA/USDT'}
+    bot.state_entry_time = time.time() - 3000
+    hc = HealthChecker(bot)
+    hc.check_interval = 0
+    with caplog.at_level('WARNING', logger='HYDRA'), \
+            patch('core.health.METRICS') as mock_metrics:
+        for _ in range(5):
+            report = hc.check()
+            assert report['checks']['state_stuck'] is False
+            assert report['overall'] is True
+        mock_metrics.health_status.set.assert_called_with(1.0)
+        mock_metrics.state_stuck.set.assert_called_with(1.0)
+    assert hc.consecutive_fails == 0
+    long_lines = [r for r in caplog.records if '@STATE_LONG@' in r.getMessage()]
+    assert len(long_lines) == 1          # throttled to once per 5 min
+    assert 'MINA/USDT' in long_lines[0].getMessage()
+
+
+def test_exit_halted_for_hours_stays_healthy():
+    bot = _healthy_bot()
+    bot.state = BotState.EXITING
+    bot.state_data = {'symbol': 'X/USDT', 'exit_halted': True}
+    bot.state_entry_time = time.time() - 10_000
+    hc = HealthChecker(bot)
+    hc.check_interval = 0
+    for _ in range(4):
+        report = hc.check()
+    assert report['checks']['state_stuck'] is False
+    assert report['overall'] is True
+    assert hc.consecutive_fails == 0
+
+
+def test_no_carriage_return_prints_in_src():
+    """print(..., end='\\r') glued thousands of chars into one docker-log line (B-10)."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[1] / 'src'
+    offenders = [str(p) for p in src.rglob('*.py') if "end='\\r'" in p.read_text(encoding='utf-8')]
+    assert offenders == []
+
+
+def test_log_every_throttles(caplog):
+    from logger_setup import log_every
+    with caplog.at_level('INFO', logger='HYDRA'):
+        for _ in range(10):
+            log_every('test_key_throttle', 60, '@TEST_PROGRESS@ tick', 20)
+    assert sum('@TEST_PROGRESS@' in r.getMessage() for r in caplog.records) == 1
+
+
+def test_exiting_limit_from_config():
+    bot = DummyBot()
+    bot.config.config = {'trading': {'order_execution_timeout_sec': 60, 'max_exit_attempts': 5}}
+    hc = HealthChecker(bot)
+    assert hc._state_limits()[BotState.EXITING] == 60 * 6 + 300
 
 
 def test_state_idle_never_stuck():

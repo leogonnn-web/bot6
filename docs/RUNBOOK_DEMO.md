@@ -21,17 +21,15 @@ sudo docker compose stop            # остановить всё, что кру
 состояние и Public IPv4. Поднять, записать новый IP.
 
 ### 0.2 Security Group — закрыть порты (аудит H1)
-Локально, в `terraform/`:
-```powershell
-# terraform.tfvars больше не в git — создать из примера, вписать свой текущий IP (whatismyip)
-Copy-Item terraform.tfvars.example terraform.tfvars   # если файла нет
-# your_ip_cidr = "<твой IP>/32"
-.\terraform.exe init
-.\terraform.exe plan      # должно показать изменение ТОЛЬКО security group (ingress 3000/9090/9092 → your_ip_cidr, 9091 удалён)
-.\terraform.exe apply
-```
-**Стоп**, если `plan` хочет пересоздать инстанс (`must be replaced`) — не применять, разбираться.
+**Не через terraform**: локального `terraform.tfstate` нет, а `terraform.tfvars` описывает другой тип инстанса —
+`apply` создал бы второй сервер. Руками в консоли:
+EC2 → Instances → инстанс → Security → Security Group → Edit inbound rules:
+порты 22, 3000, 9090, 9092 → Source = **My IP**; правило 9091, если есть, — удалить.
+Домашний IP меняется: если `ssh` отвечает `Connection timed out` — первым делом обновить эти правила.
 Проверка: `curl -m 5 http://<SERVER_IP>:9090/metrics` с чужой сети → таймаут; со своего IP → метрики.
+
+Корневой том 8 GiB для Docker мало (в 2026-10 диск был заполнен на 100 %, бот встал). EC2 → Volumes → Modify → 20 GiB,
+затем на сервере `sudo growpart /dev/nvme0n1 1 && sudo resize2fs /dev/nvme0n1p1` (без перезагрузки).
 
 ### 0.3 Ключи Bybit Demo
 Bybit → Demo Trading (переключатель в шапке) → API → создать ключ с правами **только Spot Trade** (без Withdraw).
@@ -50,6 +48,8 @@ cp ../triada_old_*/.env .                 # ключи, не в git
 cp ../triada_old_*/shared/config.json shared/config.server.json   # старый серверный конфиг — для сверки
 ```
 Дальше любой деплой = `git pull && sudo docker compose up -d --build --remove-orphans`.
+`shared/config.json` на сервере изменён локально (этап 0.6), поэтому если коммит тоже меняет конфиг, `git pull` откажется —
+тогда `git stash && git pull && git stash pop && git diff shared/config.json` (проверить, что свои значения на месте).
 
 ### 0.5 `.env` на сервере
 ```
@@ -71,10 +71,12 @@ GRAFANA_PASSWORD=<новый, не triada2024>
 "trading": { "dry_run": true,  ... "session_start_ts": <текущий unix epoch> },
 "exchange": { "name": "bybit", "demo_trading": false }
 ```
-Проверить **до** запуска:
-```bash
-python3 -c "import json,sys; sys.path.insert(0,'shared'); from config_models import validate_config; validate_config(json.load(open('shared/config.json'))); print('CONFIG OK')"
+Проверить **до** запуска (на хосте нет `pydantic` — скачать конфиг и проверить локально в репо):
+```powershell
+scp -i <KEY>.pem ubuntu@<SERVER_IP>:triada/shared/config.json $env:TEMP\server_config.json
+python -c "import json,sys; sys.path.insert(0,'shared'); from config_models import validate_config; validate_config(json.load(open(r'$env:TEMP\server_config.json',encoding='utf-8'))); print('CONFIG OK')"
 ```
+`session_start_ts` обязателен и > 0: с нулём `hydra_session_profit_usdt` покажет всю историю `trades.db`.
 
 ### 0.7 Том состояния под non-root
 ```bash
@@ -108,19 +110,30 @@ Grafana: `http://<SERVER_IP>:3000`, если том старый — `sudo docke
 ```bash
 cd ~/triada
 L=$(sudo docker inspect --format='{{.LogPath}}' hydra-bot)
-for m in @HEALTH_CRITICAL@ @WATCHDOG_RESTART@ @LOOP_ERROR@ Traceback @WS_FATAL@ @WS_RECONNECT@ @PRICE_STALE@ @BG_SCAN@ @SCAN_PICK@ @GRID_LAUNCH@ @IDLE_ENTER@; do
+for m in @HEALTH_CRITICAL@ @LOOP_ERROR@ Traceback @WS_FATAL@ @WS_RECONNECT@ @PRICE_STALE@ @BG_SCAN@ @SCAN_PICK@ @GRID_LAUNCH@ @GRID_END@ @STATE_LONG@ @IDLE_ENTER@; do
   echo "$m: $(sudo grep -c "$m" $L)"; done
+# @WATCHDOG_RESTART@ пишет watchdog в СВОЙ лог — в логе бота его нет
+echo "@WATCHDOG_RESTART@: $(sudo docker logs triada-watchdog 2>&1 | grep -c @WATCHDOG_RESTART@)"
+# длительность каждой сетки: GRID_LAUNCH -> GRID_END / PROFIT_TAKEN
+sudo docker logs hydra-bot 2>&1 | grep -E '@(GRID_LAUNCH|GRID_END|PROFIT_TAKEN|LOSS_TAKEN|EXIT_DONE)@'
 sudo docker logs --tail 20 triada-watchdog
 ```
+**Проверка ничего не доказывает без длинной сетки:** за прогон нужна хотя бы одна сетка, открытая дольше 5 минут
+(BUYING > 300 с — именно на этом watchdog стрелял в первом прогоне 2026-10-10, B-21). Если все входы закрылись быстрее —
+продлить прогон.
+
 | Маркер | Идём дальше | Стоп |
 |---|---|---|
-| `@WATCHDOG_RESTART@`, `@HEALTH_CRITICAL@` | 0 | ≥1 — смотреть, что было за 60 с до него |
+| `@WATCHDOG_RESTART@` (лог watchdog), `@HEALTH_CRITICAL@` | 0 **при ≥1 сетке дольше 5 мин** | ≥1 — смотреть, что было за 60 с до него |
+| `@STATE_LONG@` | 0, или только при сетке/позиции дольше `hard_exit_timeout_sec + 300` | при обычных сделках — порог или зависание |
 | `@LOOP_ERROR@`, `Traceback`, `@WS_FATAL@` | 0 | ≥1 |
 | `@WS_RECONNECT@` | единицы в сутки | десятки — проблема сети/подписок |
 | `@PRICE_STALE@` | редко, неликвидные пары | постоянно на ликвидных |
 | `@SCAN_PICK@` / `@GRID_LAUNCH@` | есть входы (сколько в сутки — записать, это калибровка частоты) | 0 за сутки — сканер ничего не находит, проверить пороги |
 
-Также: Grafana `hydra_heartbeat_timestamp` — ровная пила без провалов > 10 с; `hydra_health_status` = 1.
+Также: Grafana `hydra_heartbeat_timestamp` — ровная пила без провалов > 10 с; `hydra_health_status` = 1 (в том числе
+пока сетка открыта); `hydra_state_age_seconds` растёт в BUYING/IN_POSITION и сбрасывается на переходах.
+Память t3.micro (913 MB): `free -m` — `available` не ниже ~100 MB, `docker inspect -f '{{.State.OOMKilled}}' hydra-bot` = false.
 
 ---
 

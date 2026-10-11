@@ -13,6 +13,7 @@ import sys
 import os
 import csv
 import json
+import logging
 import random
 import threading
 from datetime import datetime
@@ -21,7 +22,7 @@ from typing import Dict, Optional
 # Add shared/ to path BEFORE importing shared modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'shared')))
 
-from logger_setup import logger
+from logger_setup import logger, log_every
 from config import config
 from utils import safe_float, realized_pnl, circuit_breaker_tripped
 from paths import HOT_SYMBOLS_FILE
@@ -628,6 +629,8 @@ class TradingBot(
                         # data; persisting them rewrote hydra_state.json ~1/s.
                         if not ({prev, self.state} <= {BotState.IDLE, BotState.SCANNING}):
                             self._save_state()
+                    METRICS.bot_state.set(self.state.value - 1)
+                    METRICS.state_age_seconds.set(time.time() - self.state_entry_time)
 
                     # Self-diagnostic health check
                     self.health_checker.check()
@@ -933,7 +936,7 @@ class TradingBot(
         current_hour = datetime.now().hour
         allowed_hours = trading_config.get('allowed_hours', list(range(24)))
         if current_hour not in allowed_hours:
-            print(f"Time block: Hour {current_hour} not in allowed hours @TIME_BLOCK@ ", end='\r')
+            log_every('time_block', 300, f"@TIME_BLOCK@ Hour {current_hour} not in allowed hours", logging.INFO)
             return False
         return True
 

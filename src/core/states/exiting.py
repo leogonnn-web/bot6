@@ -4,7 +4,7 @@ import sys
 import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
-from logger_setup import logger
+from logger_setup import logger, log_every
 from utils import safe_float, exit_backstop_decision
 from metrics import METRICS
 
@@ -43,7 +43,7 @@ class ExitingStateMixin:
                 return
 
             elapsed = time.time() - exit_time
-            print(f"EXITING {symbol}: {elapsed:.1f}s / {timeout_sec}s @EXITING_MONITOR@", end='\r')
+            log_every('exiting_monitor', 30, f"@EXITING_MONITOR@ {symbol}: {elapsed:.1f}s / {timeout_sec}s")
 
             if is_dry_run:
                 # Dry run: simulate fill after 1 second

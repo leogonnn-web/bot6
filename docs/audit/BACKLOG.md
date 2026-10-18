@@ -117,7 +117,18 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [x] B-22 Dry-run cancelled `virtual_*` order ids through the real API (`@ORDER_ERROR@ ... requires "apiKey"`).
   Done 2026-10-11: `BybitClient.cancel_order` short-circuits `virtual_*` ids — covers all nine call sites.
 
+- [ ] B-23 **Alerting is dead end-to-end** (found 2026-10-11 via `/api/v1/rules`): `hydra_order_errors_total`,
+  `hydra_order_latency_seconds`, `hydra_slippage_pct` are declared but never written (OrderManager only counts
+  `order_total`; slippage never observed) → `OrderErrorSpike`, `OrderLatencyHigh`, `SlippageHigh/Critical` can never
+  fire; `prometheus.yml` has no `alerting:` block → even live alerts (`BotStateStuck`, `BalanceLow`) reach nobody.
+  Do between stages: wire the three metrics (or delete their rules), add delivery (Grafana Alerting → Telegram is the
+  cheapest), test with a forced `hydra_state_stuck=1`. Must be closed before Stage 5 (real money).
+
 ## Done
+
+- [x] 2026-10-18 grid: `GRID_END` gives the position its own `buy_time` (was first fill → hard-exit fired 6 s after
+  `grid_max_hold`); `hydra_scan_cycles_total` incremented again in `_handle_scanning_state` (lost with the legacy
+  scan removal, `ScanCyclesStopped` was stuck pending). Tests in `test_grid_lifecycle.py`.
 
 - [x] 2026-10-01 **Phase 3 — grid (audit C2, plan §6 items 12–15).** `hydra_net.py` rewritten: level 0 = entry at ask,
   separate `grid_buy_order_id` / `tp_order_id`, TP refresh cancels only the TP, TP fill during the grid is an exit

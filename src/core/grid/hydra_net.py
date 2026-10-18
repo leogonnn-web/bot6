@@ -538,11 +538,16 @@ class HydraNetMixin:
                     logger.debug(f"@DISPATCHER_LINK_WARN@ {link_err}")
             sd['entry_logged'] = True
         METRICS.active_positions.set(1)
+        # The position's own clock starts NOW. Before, buy_time = first_fill_at made
+        # IN_POSITION's hard_exit_timeout (same 1800 s as grid_max_hold, same origin)
+        # expire within seconds of GRID_END(grid_max_hold): "stop averaging" turned
+        # into "market-dump immediately". Averaging and holding are separate budgets;
+        # a crash during the hold is still caught by panic_stop / knife guard.
         sd.update({
             'is_grid_active': False,
             'buy_price': avg,
             'amount': qty,
-            'buy_time': safe_float(sd.get('first_fill_at')) or time.time(),
+            'buy_time': time.time(),
             'order_id': sd.get('tp_order_id'),
             'is_breakeven': False,
             'partial_tp_hit': False,

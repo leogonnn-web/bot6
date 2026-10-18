@@ -269,6 +269,38 @@ def test_falling_knife_stops_averaging(bot):
     assert bot.state_data['grid_end_reason'] == 'falling_knife'
 
 
+def test_grid_max_hold_gives_the_position_its_own_hold_window(bot):
+    """Dry-run 2026-10-11: GRID_END(grid_max_hold) was followed by HARD_EXIT_TIMEOUT
+    6 s later because buy_time inherited the grid's first fill. Averaging and
+    holding must be separate budgets."""
+    oid = _launch(bot)
+    bot.exchange.fill(oid, 1.0)
+    bot.exchange.coin_balance = 4.995
+    _tick(bot)
+    sd = bot.state_data
+    sd['grid_started_at'] = time.time() - 1801                # grid older than hard_exit_timeout
+    sd['first_fill_at'] = time.time() - 1800
+    before = time.time()
+    _tick(bot)
+    assert bot.state == BotState.IN_POSITION
+    assert sd['grid_end_reason'] == 'grid_max_hold'
+    assert sd['buy_time'] >= before                            # fresh clock, not the grid's
+    # IN_POSITION's hard-exit check would NOT fire on the next tick
+    assert time.time() - sd['buy_time'] < TRADING['hard_exit_timeout_sec']
+
+
+def test_scanning_tick_increments_scan_cycles(bot):
+    from metrics import METRICS
+    import threading
+    bot._candidates_lock = threading.Lock()
+    bot.dispatcher_candidates = []
+    bot.state = BotState.SCANNING
+    before = METRICS.scan_cycle_total._value.get()
+    bot._handle_scanning_state()
+    assert METRICS.scan_cycle_total._value.get() == before + 1
+    assert bot.state == BotState.IDLE
+
+
 def test_unknown_status_changes_nothing(bot):
     oid = _launch(bot)
     bot.exchange.fill(oid, 1.0)

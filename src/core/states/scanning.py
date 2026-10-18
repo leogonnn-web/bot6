@@ -294,6 +294,10 @@ class ScanningStateMixin:
             logger.warning("@SCAN_NO_QUEUE@ Dispatcher queue not initialized, skipping scan")
             self.state = BotState.IDLE
             return
+        # The only increment of hydra_scan_cycles_total: its previous home was the
+        # legacy _scan_for_entries (removed), which left the ScanCyclesStopped alert
+        # firing forever.
+        METRICS.scan_cycle_total.inc()
         with self._candidates_lock:
             queue = list(self.dispatcher_candidates) if self.dispatcher_candidates else []
         if not queue:

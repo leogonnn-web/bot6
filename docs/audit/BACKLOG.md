@@ -124,6 +124,18 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   Do between stages: wire the three metrics (or delete their rules), add delivery (Grafana Alerting → Telegram is the
   cheapest), test with a forced `hydra_state_stuck=1`. Must be closed before Stage 5 (real money).
 
+- [x] B-24 **Breakeven sold the gross fill and looped with no TP** (demo stage 2, 2026-10-19, QNT): Bybit takes the
+  buy fee in the coin (bought 0.03, held 0.02997); the grid mirrors the gross fill into `amount`. `_set_breakeven`
+  canceled the TP, sold 0.03 → 170131, swallowed the error and kept `order_id` on the canceled TP → every tick
+  re-canceled/re-sold (1200× in 15 min), position naked until hard exit. Done 2026-10-19: `_sellable_amount`
+  (real balance after cancel, extracted from `_panic_sell`) used by panic, breakeven and partial TP; a failed
+  breakeven sets `order_id=None` → `@NO_TP_ORDER@` exit by real balance. Tests in `test_grid_lifecycle.py`.
+- [ ] B-25 **Fee-in-coin dust on coarse lot steps.** QNT ($194, step 0.001): 0.00097 QNT = $0.19 left per trade
+  (~3% of a $6 slot); OPG ($0.13): $0.007. Equity, not in `trades.db`. Filter pairs where `lot_step × price` >
+  ~1% of slot (scanner/quantize), or buy `amount / (1 - fee)` so the sellable size lands on a step. Before Stage 5.
+- [ ] B-26 `hydra_grid_max_levels` shows the CapitalRouter cap (2), not the effective `min(config, router)` (1)
+  after B-fix 45b4151 — misleading in Grafana. Set the gauge from `_grid_max_levels()`.
+
 ## Done
 
 - [x] 2026-10-18 grid: `GRID_END` gives the position its own `buy_time` (was first fill → hard-exit fired 6 s after

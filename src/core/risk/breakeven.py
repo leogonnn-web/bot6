@@ -29,6 +29,7 @@ class BreakevenMixin:
         return float(self.exchange.exchange.price_to_precision(symbol, buy_price * breakeven_multiplier))
 
     def _set_breakeven(self):
+        tp_canceled = False
         try:
             symbol = self.state_data['symbol']
             trading_config = self.config.get_trading_config()
@@ -37,15 +38,15 @@ class BreakevenMixin:
 
             # Отменяем ордер только если это не dry_run и order_id существует
             if not is_dry_run and order_id and not order_id.startswith('virtual_'):
+                tp_canceled = True
                 try:
                     self.exchange.cancel_order(order_id, symbol)
                     time.sleep(0.5)
                 except Exception as cancel_err:
                     logger.warning(f"@BREAKEVEN_CANCEL_WARN@ Failed to cancel order {order_id}: {cancel_err}")
 
-            amount = self.state_data.get('amount', 0)
             breakeven_price = self._breakeven_price(symbol, self.state_data['buy_price'])
-            amount = float(self.exchange.exchange.amount_to_precision(symbol, amount))
+            amount = self._sellable_amount(symbol, is_dry_run, tag='BREAKEVEN')
 
             if is_dry_run:
                 new_order_id = f"virtual_breakeven_{int(time.time())}"
@@ -63,6 +64,15 @@ class BreakevenMixin:
                 self._save_state()
         except Exception as e:
             logger.error(f"Breakeven error: {e}")
+            if tp_canceled:
+                # The TP is gone and the replacement failed. Leaving order_id on the
+                # canceled TP kept the position naked and retried cancel+sell every
+                # tick (stage 2, 2026-10-19: 1200x 170131). order_id=None routes the
+                # next tick to @NO_TP_ORDER@ -> exit by real balance.
+                logger.warning(f"@BREAKEVEN_FAILED@ {self.state_data.get('symbol')}: no resting sell -> exit")
+                self.state_data['order_id'] = None
+                if hasattr(self, '_save_state'):
+                    self._save_state()
 
     def _calculate_adaptive_breakeven_timeout(self, symbol: str) -> int:
         """

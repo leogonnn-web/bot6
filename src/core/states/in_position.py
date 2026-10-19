@@ -204,6 +204,25 @@ class InPositionStateMixin:
         except Exception as e:
             logger.error(f"@IN_POSITION_ERROR@ IN_POSITION state error for {self.state_data.get('symbol', 'unknown')}: {e}", exc_info=True)
 
+    def _sellable_amount(self, symbol: str, is_dry_run: bool, tag: str) -> float:
+        """Exchange-precision amount to sell when replacing/abandoning the TP.
+
+        Bybit takes the buy fee in the base coin, so the saved `amount` (gross fill)
+        is more than we hold and selling it fails with 170131. Call AFTER canceling
+        the resting sell, so the coin is not locked. Real balance when known; saved
+        amount in dry-run or when the balance is unknown / at dust.
+        """
+        coin_name = symbol.split('/')[0]
+        real_balance = None if is_dry_run else self.exchange.get_coin_balance(coin_name)
+        if real_balance is not None and real_balance > self._dust_threshold(symbol):
+            amount = float(self.exchange.exchange.amount_to_precision(symbol, real_balance))
+            logger.info(f"@{tag}_REAL_BALANCE@ {coin_name} real balance: {real_balance}, sell_amount: {amount}")
+            return amount
+        amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
+        if not is_dry_run:
+            logger.warning(f"@{tag}_BALANCE_FALLBACK@ {coin_name} balance={real_balance}; using saved amount: {amount}")
+        return amount
+
     def _panic_sell(self, urgent: bool = True, reason: str = 'panic') -> None:
         """Exit the position. Tries an aggressive limit-chase (maker, no slippage)
         first when enabled, falling back to a market backstop on timeout or a
@@ -225,17 +244,7 @@ class InPositionStateMixin:
             except Exception as e:
                 logger.debug(f"@PANIC_CANCEL_WARN@ Failed to cancel sell order: {e}")
 
-            # Use real available balance instead of saved amount to account for fees
-            coin_name = symbol.split('/')[0]
-            real_balance = None if is_dry_run else self.exchange.get_coin_balance(coin_name)
-            if real_balance is not None and real_balance > self._dust_threshold(symbol):
-                amount = float(self.exchange.exchange.amount_to_precision(symbol, real_balance))
-                logger.info(f"@PANIC_REAL_BALANCE@ {coin_name} real balance: {real_balance}, sell_amount: {amount}")
-            else:
-                # Balance unknown (None) or dry-run: fall back to the saved amount
-                amount = float(self.exchange.exchange.amount_to_precision(symbol, self.state_data['amount']))
-                if not is_dry_run:
-                    logger.warning(f"@PANIC_BALANCE_FALLBACK@ {coin_name} balance={real_balance}; using saved amount: {amount}")
+            amount = self._sellable_amount(symbol, is_dry_run, tag='PANIC')
 
             # Live market snapshot (fresh only; stale bid/ask must not price the exit)
             ws = self._get_fresh_price(symbol) or {}
@@ -358,11 +367,10 @@ class InPositionStateMixin:
     def _execute_partial_tp(self, symbol: str, current_price: float, partial_tp_size_pct: float, is_dry_run: bool):
         """Execute partial take profit - sell portion of position"""
         try:
-            original_amount = self.state_data['amount']
-            partial_amount = original_amount * (partial_tp_size_pct / 100)
-            remaining_amount = original_amount - partial_amount
-
             if is_dry_run:
+                original_amount = self.state_data['amount']
+                partial_amount = original_amount * (partial_tp_size_pct / 100)
+                remaining_amount = original_amount - partial_amount
                 logger.info(f"@DRY_RUN_PARTIAL_TP@ Virtual partial TP: {symbol} sell {partial_amount} @ ${current_price}")
                 self.state_data['amount'] = remaining_amount
                 trade_profit = self._calc_pnl(self.state_data['buy_price'], current_price, partial_amount)
@@ -377,6 +385,10 @@ class InPositionStateMixin:
                 logger.info(f"@PARTIAL_CANCEL@ Canceled existing sell order for partial TP")
             except Exception as e:
                 logger.debug(f"@PARTIAL_CANCEL_WARN@ Failed to cancel order before partial TP: {e}")
+
+            original_amount = self._sellable_amount(symbol, is_dry_run, tag='PARTIAL')
+            partial_amount = float(self.exchange.exchange.amount_to_precision(symbol, original_amount * (partial_tp_size_pct / 100)))
+            remaining_amount = float(self.exchange.exchange.amount_to_precision(symbol, original_amount - partial_amount))
 
             # Place partial TP order
             partial_order = self.order_manager.sell(symbol, partial_amount, current_price)

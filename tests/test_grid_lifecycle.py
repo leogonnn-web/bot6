@@ -310,6 +310,48 @@ def test_operator_max_grid_levels_survives_capital_evaluation(bot):
     assert bot._grid_max_levels() == 0
 
 
+def _in_position_with_coin_fee(bot):
+    """Entry fills 5.0 but the buy fee is taken in the coin: 4.995 held."""
+    bot.hydra_net_config['max_grid_levels'] = 1
+    oid = _launch(bot)
+    bot.exchange.fill(oid, 1.0)
+    bot.exchange.coin_balance = 4.995
+    _tick(bot)
+    bot._end_grid_to_position('grid_max_hold')
+    sd = bot.state_data
+    assert bot.state == BotState.IN_POSITION and sd['amount'] == pytest.approx(5.0)
+    sd['buy_time'] = time.time() - 1300          # past breakeven fallback (1200 s), before hard exit
+    return sd
+
+
+def test_breakeven_sells_what_is_held_not_the_gross_fill(bot):
+    """Demo stage 2 (2026-10-19, QNT): breakeven canceled the TP and sold the gross
+    fill 0.03 while 0.02997 was held -> 170131."""
+    sd = _in_position_with_coin_fee(bot)
+    tp = sd['order_id']
+    bot._handle_in_position_state()
+    assert tp in bot.exchange.cancelled
+    be = bot.exchange.orders[sd['order_id']]
+    assert be['side'] == 'sell' and be['status'] == 'open'
+    assert be['amount'] == pytest.approx(4.995)
+    assert sd['is_breakeven'] is True
+
+
+def test_failed_breakeven_exits_once_instead_of_looping(bot):
+    """The same incident: the failure left order_id on the canceled TP, so every tick
+    re-canceled and re-sold (1200x in 15 min) with no TP resting."""
+    sd = _in_position_with_coin_fee(bot)
+    bot.order_manager.sell.side_effect = Exception('bybit {"retCode":170131,"retMsg":"Insufficient balance."}')
+    bot._handle_in_position_state()
+    assert sd['order_id'] is None and not sd.get('is_breakeven')
+    sells = []
+    bot.order_manager.sell.side_effect = lambda s, a, p: sells.append(a) or bot.exchange._place('sell', s, a, p)
+    bot._handle_in_position_state()                             # @NO_TP_ORDER@ -> exit
+    assert bot.state == BotState.EXITING
+    assert sd['exit_reason'] == 'no_tp_order'
+    assert sells == [pytest.approx(4.995)]                      # one chase order, real balance
+
+
 def test_scanning_tick_increments_scan_cycles(bot):
     from metrics import METRICS
     import threading

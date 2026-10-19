@@ -116,6 +116,7 @@ def _breakeven_bot(taker=0.001, maker=0.001, buy_price=100.0, amount=3.0):
     b = TradingBot.__new__(TradingBot)
     b.exchange = MagicMock()
     b.exchange.exchange = _FakeInner(taker, maker)
+    b.exchange.get_coin_balance.return_value = amount
     b.config = MagicMock()
     b.config.get_trading_config.return_value = {"dry_run": False}
     b.order_manager = MagicMock()

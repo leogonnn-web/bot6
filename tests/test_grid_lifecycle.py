@@ -289,6 +289,27 @@ def test_grid_max_hold_gives_the_position_its_own_hold_window(bot):
     assert time.time() - sd['buy_time'] < TRADING['hard_exit_timeout_sec']
 
 
+def test_operator_max_grid_levels_survives_capital_evaluation(bot):
+    """Demo stage 2 (2026-10-19): config max_grid_levels=1 was silently lifted to 2.
+    _evaluate_capital overwrote hydra_net_config['max_grid_levels'] with the
+    CapitalRouter cap, so min(cfg, cap) compared the cap with itself."""
+    from types import SimpleNamespace
+    bot.hydra_net_config['max_grid_levels'] = 1
+    router_state = SimpleNamespace(max_grid_levels=2, mode='grid_2', grid_allowed=True)
+    bot.capital_router = MagicMock()
+    bot.capital_router.state = router_state
+    bot.capital_router.evaluate.return_value = router_state
+    bot.exchange.free_usdt = 65.42
+    bot.exchange.get_free_usdt = lambda: 65.42
+    bot._last_capital_eval = 0.0
+    bot._capital_eval_interval = 30
+    bot._evaluate_capital()                                     # the real code path
+    assert bot.hydra_net_config['max_grid_levels'] == 1         # operator limit untouched
+    assert bot._grid_max_levels() == 1                          # min(config=1, router=2)
+    router_state.max_grid_levels = 0                            # router can still LOWER it
+    assert bot._grid_max_levels() == 0
+
+
 def test_scanning_tick_increments_scan_cycles(bot):
     from metrics import METRICS
     import threading

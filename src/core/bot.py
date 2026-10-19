@@ -710,8 +710,11 @@ class TradingBot(
             base_slot = trading_config.get('slot_size', 12.0)
             state = self.capital_router.evaluate(balance_usdt, base_slot)
 
-            # Push max_grid_levels into hydra_net runtime config
-            self.hydra_net_config['max_grid_levels'] = state.max_grid_levels
+            # NOTE: the operator's hydra_net.max_grid_levels is NOT overwritten here.
+            # It used to be, which made HydraNetMixin._grid_max_levels() compare the
+            # CapitalRouter cap with itself and silently lifted a `max_grid_levels: 1`
+            # safety limit as soon as the balance crossed the grid_2 threshold.
+            # The effective value is min(config, CapitalRouter) at grid time.
 
             # Prometheus gauges
             METRICS.balance_usdt.set(balance_usdt)

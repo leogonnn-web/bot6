@@ -17,7 +17,7 @@ import logging
 import random
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # Add shared/ to path BEFORE importing shared modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'shared')))
@@ -344,16 +344,76 @@ class TradingBot(
     # ------------------------------------------------------------------
     # Exchange-truth helpers: fresh price, dust threshold, reconciled IDLE
     # ------------------------------------------------------------------
-    def _dust_threshold(self, symbol: str) -> float:
-        """Smallest amount that still counts as a position (exchange min lot if known)."""
+    def _market_limits(self, symbol: str) -> Tuple[float, float, bool]:
+        """(min_amount, min_cost, known) from the loaded markets. known=False when the
+        exchange lists markets but not this symbol (coin not tradable on spot)."""
         try:
-            market = self.exchange.exchange.markets.get(symbol) or {}
-            min_amt = safe_float(((market.get('limits') or {}).get('amount') or {}).get('min'))
-            if min_amt > 0:
-                return min_amt
+            markets = getattr(self.exchange.exchange, 'markets', None) or {}
+            market = markets.get(symbol)
+            if market is None:
+                return 0.0, 0.0, not markets
+            limits = market.get('limits') or {}
+            return (safe_float((limits.get('amount') or {}).get('min')),
+                    safe_float((limits.get('cost') or {}).get('min')), True)
         except Exception:
-            pass
-        return 0.0001
+            return 0.0, 0.0, True
+
+    def _approx_price(self, symbol: str) -> float:
+        """Last price for notional checks only (any age is fine). Never writes to
+        ws_tickers_cache: the health check counts stale entries there, and dust
+        coins are usually outside the WS universe."""
+        ws = self.ws_tickers_cache.get(symbol) or {}
+        last = safe_float(ws.get('last'))
+        if last > 0:
+            return last
+        cache = self.__dict__.setdefault('_approx_price_cache', {})
+        ts, px = cache.get(symbol, (0.0, 0.0))
+        now = time.time()
+        if px > 0 and now - ts < 300:
+            return px
+        ticker = self.exchange.fetch_ticker(symbol)
+        px = safe_float((ticker or {}).get('last'))
+        if px > 0:
+            cache[symbol] = (now, px)
+        return px
+
+    def _dust_threshold(self, symbol: str) -> float:
+        """Largest amount that does NOT count as a position: whatever cannot be sold.
+
+        Bybit rejects a sell below the min lot AND below the min order value ($5,
+        170140). Fee-in-coin remainders sit above the min lot on coarse lot steps
+        (NEAR: 0.01599 >= 0.01) but are worth cents; adopting one as a position
+        looped cancel/sell/170140 for an hour (stage 2, 2026-10-20, B-27).
+        A coin without a spot market cannot be our position -> inf.
+        """
+        min_amt, min_cost, known = self._market_limits(symbol)
+        if not known:
+            return float('inf')
+        threshold = min_amt if min_amt > 0 else 0.0001
+        if min_cost > 0:
+            px = self._approx_price(symbol)
+            if px > 0:
+                threshold = max(threshold, min_cost / px)
+        return threshold
+
+    def _entry_sellable(self, symbol: str, amount: float, price: float) -> bool:
+        """False when the slot, minus the buy fee taken in the coin and the lot-step
+        truncation, would land below the min order value - i.e. a position the bot
+        could buy but never sell back (every exit would be 170140)."""
+        _, min_cost, _ = self._market_limits(symbol)
+        if min_cost <= 0:
+            return True
+        try:
+            sellable = float(self.exchange.exchange.amount_to_precision(symbol, amount * (1 - 0.0015)))
+        except Exception:
+            sellable = amount * (1 - 0.0015)
+        if sellable * price >= min_cost:
+            return True
+        logger.warning(
+            f"@SLOT_UNSELLABLE@ {symbol}: ${amount * price:.2f} slot leaves {sellable} "
+            f"(${sellable * price:.2f}) after the fee, below min order value ${min_cost}; raise slot_size"
+        )
+        return False
 
     def _get_fresh_price(self, symbol: str, max_age_sec: float = 15.0) -> Optional[Dict]:
         """Price dict {'last','bid','ask','timestamp'} no older than max_age_sec.
@@ -431,6 +491,9 @@ class TradingBot(
                 self.state = BotState.IN_POSITION
                 self._save_state()
                 return False
+            if held > 0:
+                px = self._approx_price(symbol)
+                logger.info(f"@DUST_LEFT@ {symbol}: {held} {coin} (~${held * px:.3f}) below the min sellable size, not a position")
         logger.info(f"@IDLE_ENTER@ {symbol or '-'} ({reason})")
         self.state_data = {}
         self.state = BotState.IDLE
@@ -718,7 +781,8 @@ class TradingBot(
 
             # Prometheus gauges
             METRICS.balance_usdt.set(balance_usdt)
-            METRICS.grid_max_levels.set(state.max_grid_levels)
+            # Effective limit, not the router cap alone (B-26: Grafana showed 2 while 1 applied)
+            METRICS.grid_max_levels.set(min(int(self.hydra_net_config.get('max_grid_levels', 3)), state.max_grid_levels))
             METRICS.capital_mode.info({'mode': state.mode})
         except Exception as e:
             logger.error(f"@CAPITAL_EVAL_ERROR@ {e}")

@@ -133,8 +133,28 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [ ] B-25 **Fee-in-coin dust on coarse lot steps.** QNT ($194, step 0.001): 0.00097 QNT = $0.19 left per trade
   (~3% of a $6 slot); OPG ($0.13): $0.007. Equity, not in `trades.db`. Filter pairs where `lot_step × price` >
   ~1% of slot (scanner/quantize), or buy `amount / (1 - fee)` so the sellable size lands on a step. Before Stage 5.
-- [ ] B-26 `hydra_grid_max_levels` shows the CapitalRouter cap (2), not the effective `min(config, router)` (1)
+- [x] B-26 `hydra_grid_max_levels` shows the CapitalRouter cap (2), not the effective `min(config, router)` (1)
   after B-fix 45b4151 — misleading in Grafana. Set the gauge from `_grid_max_levels()`.
+  Done 2026-10-25: gauge = `min(hydra_net.max_grid_levels, router.max_grid_levels)`.
+- [x] B-27 **Unsellable dust adopted as a position → 170140 loop** (demo stage 2, 2026-10-20, NEAR): the TP filled
+  and left 0.01599 NEAR (~$0.08) — above the min lot (0.01) so `_dust_threshold` called it a position
+  (`@IDLE_REFUSED@`), below the $5 min order value so no sell could ever be accepted: `@NO_TP_ORDER@` → panic
+  sell → `170140` every tick, 2295× in an hour, no trades, `cancel_order(None)` spam on top.
+  Done 2026-10-25: `_dust_threshold` = `max(min_lot, min_cost / price)` (price via `_approx_price`, 300 s
+  cache, never written to `ws_tickers_cache`); a coin with no spot market is never a position; `_panic_sell`
+  refuses an amount `quantize_order` rejects (`@EXIT_UNSELLABLE@` → IDLE) and no longer cancels `None`;
+  `@DUST_LEFT@` logs what stays on the account; `_entry_sellable` refuses slots that could not be sold back
+  after the fee (`@SLOT_UNSELLABLE@`) in both entry paths. Tests: `tests/test_dust_and_tp_booking.py`.
+- [x] B-28 **Filled TP not booked when the remainder is at dust** (same run: LIT, GRASS — `@COIN_BALANCE_ZERO@`
+  → IDLE, no `sell` row, no cooldown): in `_handle_in_position_state` the balance check ran before the
+  order check, and after a fill the coin is already gone. Found by code reading before the run confirmed it.
+  Done 2026-10-25: order status is read first and a closed sell is booked before any balance decision;
+  zero balance + unknown status waits (bounded, 30 ticks, then `@TP_UNBOOKED@`). With B-27 this ordering
+  is load-bearing: every TP now leaves "dust" by definition.
+- [ ] B-29 `_calculate_adaptive_breakeven_timeout` fetched OHLCV every IN_POSITION tick (1 REST/s on top of
+  balance + order polls). Done 2026-10-25 as part of B-27: config `breakeven_timeout_sec` short-circuits,
+  otherwise ATR from the grid's 60 s cache (`_grid_atr`). Left open: `get_coin_balance` + `fetch_order`
+  are still 2 REST/s per position — acceptable, but a 2–3 s poll interval would be kinder to rate limits.
 
 ## Done
 

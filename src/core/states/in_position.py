@@ -122,27 +122,12 @@ class InPositionStateMixin:
                 # the position, so session_profit reflects fills, not intents.
                 self._reconcile_partial_tp(symbol)
 
-                # Balance check: only a CONFIRMED empty balance may end the position.
-                # None (unknown) skips the check — the old code parsed the error stub
-                # as "0 coins" and reset a live position to IDLE.
-                coin_name = symbol.split('/')[0]
-                coin_balance = self.exchange.get_coin_balance(coin_name)
-                if coin_balance is not None and coin_balance <= self._dust_threshold(symbol):
-                    logger.warning(f"@COIN_BALANCE_ZERO@ {coin_name}={coin_balance}, re-checking")
-                    time.sleep(1.0)
-                    retry_bal = self.exchange.get_coin_balance(coin_name)
-                    if retry_bal is not None and retry_bal <= self._dust_threshold(symbol):
-                        # Sold outside the bot (manual sale, TP filled while we were down...).
-                        self._transition_to_idle('coin_balance_zero')
-                        return
-
                 order_id = self.state_data.get('order_id')
                 order = None
-                order_unknown = False
+                unk = 0
                 if order_id:
                     order = self.exchange.fetch_order(order_id, symbol)
                     if order is None:
-                        order_unknown = True
                         unk = int(self.state_data.get('status_unknown_count', 0)) + 1
                         self.state_data['status_unknown_count'] = unk
                         if unk == 1 or unk % 30 == 0:
@@ -153,6 +138,9 @@ class InPositionStateMixin:
                 # A completed take-profit requires a *filled SELL* order. Guard against
                 # misreading the (already closed) BUY order as a sell — that bug caused
                 # instant exits at entry price (fee bleed).
+                # Checked BEFORE the balance: once the TP fills the coin is already at
+                # dust, and the balance check used to win the race -> IDLE with no
+                # log_trade / cooldown / feedback (stage 2: LIT, GRASS).
                 if order is not None and order.get('side') == 'sell' and order.get('status') in ('closed', 'filled'):
                     if not self.state_data.get('exit_logged'):
                         close_price = safe_float(order.get('average') or order.get('price') or self.state_data['buy_price'])
@@ -162,12 +150,33 @@ class InPositionStateMixin:
                         METRICS.session_profit.set(self.session_profit)
                         self.trade_db.log_trade(symbol, "sell", sold_qty, close_price, confidence=0.0, profit=trade_profit)
                         self._apply_dispatcher_feedback(trade_profit)
+                        self._update_symbol_cooldown(symbol)
                         tag = "PROFIT_TAKEN" if trade_profit >= 0 else "LOSS_TAKEN"
                         logger.info(f"@{tag}@ {symbol} ${trade_profit:+.2f} @ {close_price}")
                         self.state_data['exit_logged'] = True
                     # IDLE only if the exchange confirms we no longer hold the coin.
                     self._transition_to_idle('tp_filled')
                     return
+
+                # Balance check: only a CONFIRMED empty balance may end the position.
+                # None (unknown) skips the check — the old code parsed the error stub
+                # as "0 coins" and reset a live position to IDLE.
+                coin_name = symbol.split('/')[0]
+                coin_balance = self.exchange.get_coin_balance(coin_name)
+                if coin_balance is not None and coin_balance <= self._dust_threshold(symbol):
+                    if order_id and order is None and unk < 30:
+                        # Coin gone but the sell's status is unknown: wait for it so the
+                        # exit gets booked. Bounded — after ~30 ticks IDLE without a record.
+                        return
+                    logger.warning(f"@COIN_BALANCE_ZERO@ {coin_name}={coin_balance}, re-checking")
+                    time.sleep(1.0)
+                    retry_bal = self.exchange.get_coin_balance(coin_name)
+                    if retry_bal is not None and retry_bal <= self._dust_threshold(symbol):
+                        # Sold outside the bot (manual sale, TP filled while we were down...).
+                        if order_id and order is None:
+                            logger.error(f"@TP_UNBOOKED@ {symbol} sell {order_id} status never resolved; exit not in trades.db")
+                        self._transition_to_idle('coin_balance_zero')
+                        return
 
                 # No resting SELL order at all (TP placement failed, or order_id points at
                 # a non-sell order): exit via limit-chase/market rather than hold unmanaged.
@@ -238,11 +247,12 @@ class InPositionStateMixin:
             buy_price = self.state_data['buy_price']
 
             # Cancel existing sell order if any
-            try:
-                self.exchange.cancel_order(self.state_data['order_id'], symbol)
-                logger.info(f"@PANIC_CANCEL@ Canceled existing sell order: {self.state_data['order_id']}")
-            except Exception as e:
-                logger.debug(f"@PANIC_CANCEL_WARN@ Failed to cancel sell order: {e}")
+            if self.state_data.get('order_id'):
+                try:
+                    self.exchange.cancel_order(self.state_data['order_id'], symbol)
+                    logger.info(f"@PANIC_CANCEL@ Canceled existing sell order: {self.state_data['order_id']}")
+                except Exception as e:
+                    logger.debug(f"@PANIC_CANCEL_WARN@ Failed to cancel sell order: {e}")
 
             amount = self._sellable_amount(symbol, is_dry_run, tag='PANIC')
 
@@ -251,6 +261,13 @@ class InPositionStateMixin:
             best_bid = safe_float(ws.get('bid'))
             best_ask = safe_float(ws.get('ask'))
             cur_price = best_bid or best_ask or buy_price
+
+            # Below the exchange's min lot / min order value no sell can ever be
+            # accepted (170140); sending one every tick is the B-27 loop.
+            if not is_dry_run and self.exchange.quantize_order(symbol, amount, cur_price) is None:
+                logger.warning(f"@EXIT_UNSELLABLE@ {symbol}: {amount} (~${amount * cur_price:.3f}) is below exchange limits, no order sent")
+                self._transition_to_idle('unsellable_dust')
+                return
 
             # Hard-adverse safeguard: urgent + already far below entry -> straight to market
             backstop_now, bs_reason = exit_backstop_decision(

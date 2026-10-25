@@ -216,6 +216,8 @@ class BuyingStateMixin:
             buy_price = safe_float(tickers[symbol]['ask'])
             slot_size = trading_config['slot_size']
             amount_target = float(self.exchange.exchange.amount_to_precision(symbol, slot_size / buy_price))
+            if not self._entry_sellable(symbol, amount_target, buy_price):
+                return
 
             if is_dry_run:
                 logger.info(f"@DRY_RUN_BUY@ Virtual buy: {symbol} ${slot_size} @ ${buy_price}")

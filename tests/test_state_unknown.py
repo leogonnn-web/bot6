@@ -68,6 +68,14 @@ class FakeExchange:
         self.cancelled.append(order_id)
         return {}
 
+    def quantize_order(self, symbol, amount, price):
+        lim = (self.exchange.markets.get(symbol) or {}).get('limits') or {}
+        min_amt = (lim.get('amount') or {}).get('min', 0.0)
+        min_cost = (lim.get('cost') or {}).get('min', 0.0)
+        if amount <= 0 or amount < min_amt or amount * price < min_cost:
+            return None
+        return amount, price
+
 
 TRADING = {
     'dry_run': False, 'slot_size': 5.0, 'take_profit': 1.5, 'panic_stop': 1.2,
@@ -307,11 +315,14 @@ def test_in_position_unknown_balance_never_resets(bot):
 
 
 def test_in_position_confirmed_zero_balance_goes_idle(bot):
+    """TP canceled and the coin sold outside the bot: nothing to book, IDLE."""
     _in_position(bot)
     bot.ws_tickers_cache['SHIB/USDT'] = _fresh(1.0)
+    bot.exchange.order = {'id': 'tp1', 'status': 'canceled', 'side': 'sell', 'filled': 0.0}
     bot.exchange.coin_balance = 0.0
     bot._handle_in_position_state()
     assert bot.state == BotState.IDLE
+    assert not bot.trade_db.log_trade.called
 
 
 def test_in_position_tp_filled_logs_once_even_if_idle_deferred(bot):

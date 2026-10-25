@@ -7,8 +7,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 from logger_setup import logger
 from utils import safe_float
 
-from indicators.matrix import ATRAnalyzer
-
 
 class BreakevenMixin:
     def _breakeven_price(self, symbol: str, buy_price: float) -> float:
@@ -80,17 +78,18 @@ class BreakevenMixin:
         Formula: timeout = (ATR / current_price) * 10000 * volatility_multiplier
         """
         try:
-            # Get ATR for last 20 candles
-            ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
-            if len(ohlcv) < 14:
-                logger.debug(f"@ATR_TIMEOUT@ Insufficient OHLCV data: {len(ohlcv)} candles, using fallback 1200s")
-                return 1200  # Fallback to 20 min
+            # Config override wins outright — no market data needed for it.
+            config_timeout = self.config.get_trading_config().get('breakeven_timeout_sec', None)
+            if config_timeout:
+                return int(config_timeout)
 
-            # Calculate ATR
-            atr = ATRAnalyzer.calculate(ohlcv, period=14)
-            current_price = safe_float(ohlcv[-1][4])
+            # Called every IN_POSITION tick: ATR comes from the 60 s cache shared with
+            # the grid (_grid_atr), not a fresh fetch_ohlcv per second.
+            atr = self._grid_atr(symbol)
+            px = self._get_fresh_price(symbol)
+            current_price = safe_float(px.get('last')) if px else 0.0
 
-            if atr <= 0 or current_price <= 0:
+            if not atr or atr <= 0 or current_price <= 0:
                 logger.debug(f"@ATR_TIMEOUT@ Invalid ATR: {atr} or price: {current_price}, using fallback 1200s")
                 return 1200
 
@@ -108,12 +107,6 @@ class BreakevenMixin:
                 timeout_sec = 900   # 15 minutes
             else:
                 timeout_sec = 300   # 5 minutes
-
-            # Can override via config
-            trading_config = self.config.get_trading_config()
-            config_timeout = trading_config.get('breakeven_timeout_sec', None)
-            if config_timeout:
-                timeout_sec = config_timeout
 
             logger.debug(f"@ATR_TIMEOUT@ ATR: {atr_pct:.2f}%, Breakeven timeout: {timeout_sec}s")
             return int(timeout_sec)

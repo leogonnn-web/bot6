@@ -224,6 +224,9 @@ class HydraNetMixin:
                 logger.warning(f"@GRID_SKIP@ {symbol}: entry below exchange limits, not entering")
                 return
             amount, buy_price = q
+            if not self._entry_sellable(symbol, amount, buy_price):
+                logger.warning(f"@GRID_SKIP@ {symbol}: slot could not be sold back, not entering")
+                return
 
             # State first (so _grid_place can see is_dry_run / virtual book), then the order.
             self.state_data = {

@@ -156,6 +156,15 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   otherwise ATR from the grid's 60 s cache (`_grid_atr`). Left open: `get_coin_balance` + `fetch_order`
   are still 2 REST/s per position — acceptable, but a 2–3 s poll interval would be kinder to rate limits.
 
+- [ ] B-32 **Фильтр ликвидности по «пустым свечам» (напоминание оператора, 2026-10-26).** Цель: не входить
+  в монеты, где торги фактически остановлены, и не висеть в сделке. Идея: перед входом проверять 1m-свечи
+  за последний час; если ≥ 2 бара «пустые» — пропустить символ. «Пустая» (ИЛИ): `volume == 0`; или
+  `high == low` / `open == close` при минимальном объёме (доджи без тела). Отказ → `reject_reason='idle_candles'`
+  в `dispatcher_features` (TZ-13A уже пишет отказы). Данные уже есть: `_validate_candidate` тянет
+  `fetch_ohlcv(1m, limit=60)` до фильтров — реализация почти бесплатная. **Сначала измерить**: из отчёта
+  TZ-13C видно, какие `reject_reason` и исходы у плоских/мёртвых пар; если `timeout`/panic у вошедших не
+  коррелирует с пустыми свечами — фильтр не нужен. Кандидат на порог: `trading.max_idle_candles_1h` (default 2).
+
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →
   `health_status=0` → `@WATCHDOG_RESTART@`. Bybit pushes a spot ticker only on change; BILL/BSB/OPG-class pairs

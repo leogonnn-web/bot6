@@ -270,6 +270,122 @@ def test_validate_candidate_logged_row_equals_carried_features(analyzer_ok):
     assert kwargs['obi_skew'] == pytest.approx(20 / 180)
 
 
+# ------------------------------------------------- TZ-13A: rejects and the pick
+def _df_rows(db, cols):
+    cur = db._conn.cursor()
+    cur.execute(f"SELECT {cols} FROM dispatcher_features ORDER BY id")
+    return cur.fetchall()
+
+
+def test_schema_has_tz13a_columns(db):
+    assert set(TradeDatabase.DF_OUTCOME_COLUMNS) <= _columns(db)
+
+
+def test_log_dispatcher_features_returns_row_id(db):
+    kw = dict(trade_id=0, symbol='DOGE/USDT', confidence=71.0, rvol_spike=2.1,
+              rvol_local=2.1, dump_depth=4.5, obi_skew=0.2, btc_1h=-0.3,
+              score=8.0, mode='normal')
+    first, second = db.log_dispatcher_features(**kw), db.log_dispatcher_features(**kw)
+    assert first and second == first + 1
+
+
+def test_rvol_low_reject_logs_one_row(analyzer_ok, db):
+    s = _ValidatingScanner(dispatcher_enabled=True, trade_db=db)
+    s._calculate_real_rvol = lambda ohlcv: 0.5
+    s._add_to_rejected_cache = lambda *a: None
+
+    assert s._validate_candidate(dict(CANDIDATE), 'neutral', -0.3) is None
+
+    rows = _df_rows(db, "reject_reason, rvol_spike, dump_depth, confidence, score, "
+                        "entry_ask, bid_ask_source, trade_id, picked")
+    assert rows == [('rvol_low', 0.5, 4.5, None, None, 1.01, 'book', 0, 0)]
+
+
+def test_conf_low_reject_carries_confidence(monkeypatch, db):
+    import indicators.matrix as m
+    monkeypatch.setattr(m, 'analyzer', SimpleNamespace(complete_analysis=lambda **k: {
+        'status': 'ok', 'recommendation': 'BUY', 'confidence': 10.0}), raising=False)
+    s = _ValidatingScanner(dispatcher_enabled=True, trade_db=db)
+    s._add_to_rejected_cache = lambda *a: None
+
+    assert s._validate_candidate(dict(CANDIDATE), 'neutral', 0.0) is None
+    assert _df_rows(db, "reject_reason, confidence") == [('conf_low', 10.0)]
+
+
+def test_passed_candidate_has_null_reject_reason(analyzer_ok, db):
+    res = _ValidatingScanner(dispatcher_enabled=True, trade_db=db)._validate_candidate(
+        dict(CANDIDATE), 'neutral', 0.0)
+
+    rows = _df_rows(db, "id, reject_reason, picked")
+    assert rows == [(res['feature_row_id'], None, 0)]
+    assert 'feature_row_id' not in res['dispatcher_features']
+
+
+class _PickingScanner(_ValidatingScanner):
+    """Enough of the bot for one _handle_scanning_state tick."""
+
+    def __init__(self, trade_db, min_score):
+        import threading
+        super().__init__(dispatcher_enabled=True, trade_db=trade_db)
+        self.config.get_market_conditions_config = lambda: {'btc_trend_detection': False}
+        self.config.config = {'dispatcher': {'min_score_for_entry': min_score}}
+        self.maintenance_mode = False
+        self._candidates_lock = threading.Lock()
+        self.dispatcher_candidates = [
+            {'symbol': 'DOGE/USDT', 'price': 1.0, 'drop': 4.5},
+            {'symbol': 'ADA/USDT', 'price': 1.0, 'drop': 2.0},
+        ]
+        self.ws_tickers_cache['ADA/USDT'] = dict(self.ws_tickers_cache['DOGE/USDT'])
+        self.launched = []
+        self.state = None
+
+    def _get_retry_candidates(self):
+        return []
+
+    def _update_symbol_cooldown(self, symbol):
+        pass
+
+    def _launch_grid_network(self, symbol, *a, **k):
+        self.launched.append(symbol)
+
+
+def test_scan_pick_marks_exactly_one_row(analyzer_ok, db):
+    s = _PickingScanner(db, min_score=0.0)
+    s._handle_scanning_state()
+
+    assert s.launched == ['DOGE/USDT']
+    rows = _df_rows(db, "symbol, reject_reason, picked")
+    assert sorted(rows) == [('ADA/USDT', None, 0), ('DOGE/USDT', None, 1)]
+
+
+def test_dynamic_min_score_reject_marks_best(analyzer_ok, db):
+    s = _PickingScanner(db, min_score=1e9)
+    s._handle_scanning_state()
+
+    assert s.launched == []
+    rows = _df_rows(db, "symbol, reject_reason, picked")
+    assert sorted(rows) == [('ADA/USDT', None, 0), ('DOGE/USDT', 'dyn_min_score', 0)]
+
+
+def test_migration_adds_tz13a_columns_with_picked_default(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE dispatcher_features (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id INTEGER, timestamp REAL,
+        symbol TEXT, confidence REAL, rvol_spike REAL, rvol_local REAL,
+        dump_depth REAL, obi_skew REAL, btc_1h REAL, score REAL, mode TEXT)""")
+    conn.execute("INSERT INTO dispatcher_features (symbol) VALUES ('OLD/USDT')")
+    conn.commit()
+    conn.close()
+
+    d = TradeDatabase(db_path=path)
+    try:
+        assert _df_rows(d, "symbol, reject_reason, picked") == [('OLD/USDT', None, 0)]
+    finally:
+        d.close()
+
+
 @pytest.mark.parametrize('trading, demo, expected', [
     ({'dry_run': True}, False, 'dry_run'),
     ({'dry_run': True}, True, 'dry_run'),

@@ -27,8 +27,15 @@ class TradeDatabase:
         'spread_pct', 'bid_vol', 'ask_vol', 'turnover24h', 'bid_ask_source',
         'tp_pct', 'sl_pct', 'hold_sec', 'entry_ask', 'source',
     )
-    DF_COLUMNS = ('profit', 'take_profit_pct') + DF_CONTEXT_COLUMNS
-    DF_TEXT_COLUMNS = ('bid_ask_source', 'source')
+    # TZ-13A: rejected candidates are logged too (reject_reason NULL = passed),
+    # the scan winner is flagged; the last five are TZ-16 features, NULL for now.
+    DF_OUTCOME_COLUMNS = (
+        'reject_reason', 'picked', 'sigma_1m', 'dump_z', 'vol_decay',
+        'higher_low', 'sell_ratio',
+    )
+    DF_COLUMNS = ('profit', 'take_profit_pct') + DF_CONTEXT_COLUMNS + DF_OUTCOME_COLUMNS
+    DF_TEXT_COLUMNS = ('bid_ask_source', 'source', 'reject_reason')
+    DF_COLUMN_TYPES = {'picked': 'INTEGER DEFAULT 0', 'higher_low': 'INTEGER'}
 
     def __init__(self, db_path: str = None):
         self.db_path = db_path or TRADES_DB
@@ -113,16 +120,24 @@ class TradeDatabase:
                     sl_pct REAL,
                     hold_sec REAL,
                     entry_ask REAL,
-                    source TEXT
+                    source TEXT,
+                    reject_reason TEXT,
+                    picked INTEGER DEFAULT 0,
+                    sigma_1m REAL,
+                    dump_z REAL,
+                    vol_decay REAL,
+                    higher_low INTEGER,
+                    sell_ratio REAL
                 )
             ''')
             # Migration: add columns missing on pre-existing tables. REAL unless
-            # listed in DF_TEXT_COLUMNS (offline calibration inputs, TZ-12A).
+            # listed in DF_TEXT_COLUMNS / DF_COLUMN_TYPES (offline calibration inputs, TZ-12A).
             cursor.execute("PRAGMA table_info(dispatcher_features)")
             df_cols = [r[1] for r in cursor.fetchall()]
             for col in self.DF_COLUMNS:
                 if col not in df_cols:
-                    col_type = 'TEXT' if col in self.DF_TEXT_COLUMNS else 'REAL'
+                    col_type = self.DF_COLUMN_TYPES.get(
+                        col, 'TEXT' if col in self.DF_TEXT_COLUMNS else 'REAL')
                     cursor.execute(f"ALTER TABLE dispatcher_features ADD COLUMN {col} {col_type}")
                     logger.info(f"DB MIGRATION: added '{col}' to dispatcher_features")
             # Migration: add profit column if missing on existing table
@@ -172,7 +187,11 @@ class TradeDatabase:
                                 ask_vol: float = None, turnover24h: float = None,
                                 bid_ask_source: str = None, tp_pct: float = None,
                                 sl_pct: float = None, hold_sec: float = None,
-                                entry_ask: float = None, source: str = None):
+                                entry_ask: float = None, source: str = None,
+                                reject_reason: str = None, picked: int = 0,
+                                sigma_1m: float = None, dump_z: float = None,
+                                vol_decay: float = None, higher_low: int = None,
+                                sell_ratio: float = None) -> int | None:
         """Log dispatcher scoring features for post-trade analysis (feedback loop data).
 
         The TZ-12A parameters (spread_pct … source) default to None so older call
@@ -180,6 +199,9 @@ class TradeDatabase:
         (TZ-12B) treats as a reason to skip the row rather than as a zero.
         `spread_pct` must be left None unless bid/ask came from a real book
         (`bid_ask_source == 'book'`).
+        TZ-13A: `reject_reason` names the scanner filter that refused the
+        candidate (None = passed); `picked` marks the scan winner.
+        Returns the row id, or None if the write failed.
         """
         try:
             ts = time.time()
@@ -189,6 +211,8 @@ class TradeDatabase:
                 'profit', 'take_profit_pct',
                 'spread_pct', 'bid_vol', 'ask_vol', 'turnover24h', 'bid_ask_source',
                 'tp_pct', 'sl_pct', 'hold_sec', 'entry_ask', 'source',
+                'reject_reason', 'picked', 'sigma_1m', 'dump_z', 'vol_decay',
+                'higher_low', 'sell_ratio',
             ]
             vals = [
                 trade_id, ts, symbol, confidence, rvol_spike,
@@ -196,23 +220,49 @@ class TradeDatabase:
                 profit, take_profit_pct,
                 spread_pct, bid_vol, ask_vol, turnover24h, bid_ask_source,
                 tp_pct, sl_pct, hold_sec, entry_ask, source,
+                reject_reason, picked, sigma_1m, dump_z, vol_decay,
+                higher_low, sell_ratio,
             ]
             ph = ','.join('?' for _ in vals)
             sql = f"INSERT INTO dispatcher_features ({','.join(cols)}) VALUES ({ph})"
-            self._ensure_connection()
-            if self._conn:
-                cursor = self._conn.cursor()
-                cursor.execute(sql, vals)
-                self._conn.commit()
-            else:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute(sql, vals)
-                conn.commit()
-                conn.close()
-            logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol}")
+            row_id = self._execute_write(sql, vals)
+            logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol} id={row_id}")
+            return row_id
         except Exception as e:
             logger.error(f"@DISPATCHER_LOG_WARN@ {e}")
+            return None
+
+    def mark_dispatcher_features(self, row_id: int, picked: int = None,
+                                 reject_reason: str = None) -> None:
+        """TZ-13A: flag a scan-time row after the pick — winner (`picked=1`) or
+        refused by the dynamic min-score gate (`reject_reason='dyn_min_score'`)."""
+        updates = {k: v for k, v in (('picked', picked), ('reject_reason', reject_reason))
+                   if v is not None}
+        if not row_id or not updates:
+            return
+        try:
+            sets = ','.join(f"{k} = ?" for k in updates)
+            self._execute_write(f"UPDATE dispatcher_features SET {sets} WHERE id = ?",
+                                [*updates.values(), row_id])
+        except Exception as e:
+            logger.error(f"@DISPATCHER_LOG_WARN@ mark id={row_id}: {e}")
+
+    def _execute_write(self, sql: str, vals) -> int:
+        """Run one write on the persistent connection (or a one-off one); returns lastrowid."""
+        self._ensure_connection()
+        if self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute(sql, vals)
+            self._conn.commit()
+            return cursor.lastrowid
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, vals)
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
 
     def get_session_stats(self, since_ts: float = 0) -> Dict:
         """

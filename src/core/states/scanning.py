@@ -141,12 +141,14 @@ class ScanningStateMixin:
         if real_rvol < min_rvol:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: RVOL={real_rvol:.2f}x < {min_rvol}x")
             self._add_to_rejected_cache(candidate, "rvol_low")
+            self._log_rejected_candidate(candidate, 'rvol_low', real_rvol, btc_change_1h)
             return None
         # Filter: shallow drop + low RVOL = weak momentum / fake-out
         drop_pct = candidate.get('drop', 0)
         if drop_pct < 1.0 and real_rvol < 2.0:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: shallow drop={drop_pct:.2f}% < 1.0% and RVOL={real_rvol:.2f}x < 2.0x")
             self._add_to_rejected_cache(candidate, "shallow_drop")
+            self._log_rejected_candidate(candidate, 'shallow_drop', real_rvol, btc_change_1h)
             return None
         market_config = self.config.get_market_conditions_config()
         analysis = None
@@ -159,31 +161,38 @@ class ScanningStateMixin:
                 )
                 if analysis.get('status', '') != 'ok':
                     logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: analyzer status={analysis.get('status', 'unknown')}")
+                    self._log_rejected_candidate(candidate, 'analyzer_status', real_rvol, btc_change_1h)
                     return None
             except Exception as e:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: analyzer exception: {e}")
+                self._log_rejected_candidate(candidate, 'analyzer_error', real_rvol, btc_change_1h)
                 return None
             base_threshold = trading_config.get('min_confidence_threshold', 60.0)
             base_threshold = max(base_threshold, 20.0)
+            conf = analysis.get('confidence', 0)
             if analysis['recommendation'] not in ['STRONG_BUY', 'BUY']:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: rec={analysis['recommendation']}")
+                self._log_rejected_candidate(candidate, 'rec', real_rvol, btc_change_1h, conf)
                 return None
-            conf = analysis.get('confidence', 0)
             if conf < base_threshold:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: conf={conf:.1f}% < {base_threshold}%")
                 self._add_to_rejected_cache(candidate, "conf_low")
+                self._log_rejected_candidate(candidate, 'conf_low', real_rvol, btc_change_1h, conf)
                 return None
         else:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: indicators disabled")
+            self._log_rejected_candidate(candidate, 'indicators_off', real_rvol, btc_change_1h)
             return None
         if not self._check_btc_trend():
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: _check_btc_trend failed")
+            self._log_rejected_candidate(candidate, 'btc_trend', real_rvol, btc_change_1h, conf)
             return None
         btc_correlation = self._calculate_btc_correlation(symbol)
         correlation_threshold = market_config.get('btc_correlation_threshold', 0.5)
         if btc_correlation < correlation_threshold:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: corr={btc_correlation:.2f} < {correlation_threshold}")
             self._add_to_rejected_cache(candidate, "corr_low")
+            self._log_rejected_candidate(candidate, 'corr_low', real_rvol, btc_change_1h, conf)
             return None
         # Defaults = "no dispatcher opinion": what the candidate carries when the
         # dispatcher is disabled or scoring failed.
@@ -230,9 +239,10 @@ class ScanningStateMixin:
             **context,
         }
         # Phase 1: Log features to DB (feedback_loop = OFF)
+        feature_row_id = None
         if scored and getattr(self, 'trade_db', None):
             try:
-                self.trade_db.log_dispatcher_features(trade_id=0, **dispatcher_features)
+                feature_row_id = self.trade_db.log_dispatcher_features(trade_id=0, **dispatcher_features)
                 logger.debug(f"@DISPATCHER_LOG@ Features logged for {symbol}")
             except Exception as db_err:
                 logger.error(f"@DISPATCHER_LOG_WARN@ {db_err}")
@@ -245,7 +255,39 @@ class ScanningStateMixin:
             'rvol': real_rvol,
             'confidence': analysis.get('confidence', 0),
             'dispatcher_features': dispatcher_features,
+            'feature_row_id': feature_row_id,
         }
+
+    def _log_rejected_candidate(self, candidate, reason: str, real_rvol: float,
+                                btc_change_1h: float, confidence: float = None) -> None:
+        """TZ-13A: one dispatcher_features row per refused candidate, so offline
+        labelling can tell what each filter cuts. Pure observation: never raises,
+        never changes the verdict. Score/mode stay NULL — the dispatcher never ran."""
+        if not getattr(self, 'trade_db', None):
+            return
+        symbol = candidate['symbol']
+        try:
+            ticker_data = self.ws_tickers_cache.get(symbol, {})
+            bid_vol = safe_float(ticker_data.get('bidVolume', 0))
+            ask_vol = safe_float(ticker_data.get('askVolume', 0))
+            total_vol = bid_vol + ask_vol
+            self.trade_db.log_dispatcher_features(
+                trade_id=0, symbol=symbol, confidence=confidence,
+                rvol_spike=real_rvol, rvol_local=real_rvol,
+                dump_depth=candidate.get('drop'),
+                obi_skew=(bid_vol - ask_vol) / total_vol if total_vol > 0 else 0.0,
+                btc_1h=btc_change_1h, score=None, mode=None,
+                reject_reason=reason,
+                **self._candidate_context(ticker_data, bid_vol, ask_vol, 'normal'),
+            )
+        except Exception as e:
+            logger.error(f"@DISPATCHER_LOG_WARN@ reject {symbol} {reason}: {e}")
+
+    def _mark_feature_row(self, result: dict, **fields) -> None:
+        """TZ-13A: flag the scan-time row of a validated candidate (pick / dyn gate)."""
+        row_id = result.get('feature_row_id')
+        if row_id and getattr(self, 'trade_db', None):
+            self.trade_db.mark_dispatcher_features(row_id, **fields)
 
     def _candidate_context(self, ticker_data: dict, bid_vol: float,
                            ask_vol: float, mode: str) -> dict:
@@ -370,6 +412,7 @@ class ScanningStateMixin:
                     f"@SCAN_REJECT_DYNAMIC@ {best['symbol']} score={best['score']:.2f} "
                     f"below dynamic_min_score={min_score:.2f} (btc_1h={btc_change_1h:+.2f}%)"
                 )
+                self._mark_feature_row(best, reject_reason='dyn_min_score')
                 self.state = BotState.IDLE
                 return
 
@@ -377,6 +420,7 @@ class ScanningStateMixin:
                 f"@SCAN_PICK@ Dispatcher chose best: {best['symbol']} score={best['score']:.2f} "
                 f"mode={best['mode']} drop={best['drop']:.2f}% rvol={best['rvol']:.1f}x conf={best['confidence']:.1f}%"
             )
+            self._mark_feature_row(best, picked=1)
             self._update_symbol_cooldown(best['symbol'])
             self._launch_grid_network(
                 best['symbol'], best['price'], self.ws_tickers_cache,

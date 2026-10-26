@@ -120,6 +120,10 @@ class _Metrics:
             'hydra_session_profit_usdt',
             'Cumulative session profit in USDT',
         )
+        self.dust_usdt = Gauge(
+            'hydra_dust_usdt',
+            'Approx. USDT value of unsellable non-USDT remainders (below the dust threshold)',
+        )
         self.health_status = Gauge(
             'hydra_health_status',
             'Health check status (1=healthy, 0=degraded)',

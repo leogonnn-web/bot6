@@ -76,6 +76,7 @@ class Config:
                 "log_dry_run_trades": True,
                 "take_profit": 1.5,
                 "partial_tp_activation_pct": 1.0,
+                "max_lot_step_pct": 0.5,
                 "partial_tp_size_pct": 50.0,
                 "move_to_breakeven": True,
                 "trailing_callback_pct": 0.8

@@ -591,8 +591,21 @@ class BybitClient:
         invariant, which must be fail-closed: unknown -> no new buy.
         """
         bal = self.fetch_balance()
+        return None if bal is None else self._holdings_from_balance(bal)
+
+    def balance_snapshot(self) -> Optional[Tuple[float, Dict[str, float]]]:
+        """(free USDT, non-USDT holdings) from ONE fetch_balance. None = unknown.
+
+        The periodic capital evaluation needs both; two calls would double the
+        REST load every 30 s (TZ-14: dust gauge reuses the capital fetch).
+        """
+        bal = self.fetch_balance()
         if bal is None:
             return None
+        return self._coin_from_balance(bal, 'USDT', prefer_free=True), self._holdings_from_balance(bal)
+
+    @staticmethod
+    def _holdings_from_balance(bal: Dict) -> Dict[str, float]:
         holdings: Dict[str, float] = {}
         try:
             coins = (((bal.get('info') or {}).get('result') or {}).get('list') or [{}])[0].get('coin') or []

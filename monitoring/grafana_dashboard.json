@@ -175,6 +175,17 @@
           { "expr": "hydra_balance_usdt", "legendFormat": "USDT Balance" }
         ],
         "fieldConfig": { "defaults": { "unit": "currencyUSD", "custom": { "fillOpacity": 15 } } }
+      },
+      {
+        "id": 31,
+        "title": "Session Profit vs Dust",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 24, "x": 0, "y": 32 },
+        "targets": [
+          { "expr": "hydra_session_profit_usdt", "legendFormat": "Profit" },
+          { "expr": "hydra_dust_usdt", "legendFormat": "Dust (unsellable fee remainders)" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "currencyUSD", "custom": { "fillOpacity": 15 } } }
       }
     ]
 }

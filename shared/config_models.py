@@ -24,9 +24,14 @@ Public entry point
 """
 from __future__ import annotations
 
+import logging
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+
+# Same logger as logger_setup ('HYDRA'), without importing it: this module must
+# stay importable standalone (tests, tools).
+logger = logging.getLogger('HYDRA')
 
 
 class ConfigValidationError(ValueError):
@@ -65,6 +70,8 @@ class TradingConfig(BaseModel):
     breakeven_timeout_sec: Optional[int] = Field(default=None, description="Breakeven timeout (None = adaptive)")
     block_night_trading: Optional[bool] = Field(default=False)
     allowed_hours: Optional[List[int]] = Field(default=None, description="Allowed trading hours 0-23")
+    max_lot_step_pct: float = Field(default=0.5, gt=0.0,
+                                    description="Skip symbols whose lot step costs more than this % of slot_size")
 
 
 class HydraNetConfig(BaseModel):
@@ -307,7 +314,20 @@ def validate_config(raw_config: dict) -> dict:
     if errors:
         raise ConfigValidationError("\n".join(errors))
 
+    _warn_dead_partial_tp(out)
     return out
+
+
+def _warn_dead_partial_tp(cfg: dict) -> None:
+    """TZ-14: partial TP that activates at or above the grid TP never fires — the
+    full TP fills first. A warning, not an error: the setting is merely inert."""
+    activation = (cfg.get('trading') or {}).get('partial_tp_activation_pct') or 0.0
+    tp = (cfg.get('hydra_net') or {}).get('take_profit_pct')
+    if activation > 0 and tp is not None and activation >= tp:
+        logger.warning(
+            f"@CONFIG_WARN@ trading.partial_tp_activation_pct={activation} >= "
+            f"hydra_net.take_profit_pct={tp}: partial TP can never trigger; set it to 0.0 to disable"
+        )
 
 
 def _format_pydantic_errors(section: str, exc: ValidationError) -> str:

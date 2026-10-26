@@ -299,8 +299,7 @@ def test_operator_max_grid_levels_survives_capital_evaluation(bot):
     bot.capital_router = MagicMock()
     bot.capital_router.state = router_state
     bot.capital_router.evaluate.return_value = router_state
-    bot.exchange.free_usdt = 65.42
-    bot.exchange.get_free_usdt = lambda: 65.42
+    bot.exchange.balance_snapshot = lambda: (65.42, {})
     bot._last_capital_eval = 0.0
     bot._capital_eval_interval = 30
     bot._evaluate_capital()                                     # the real code path

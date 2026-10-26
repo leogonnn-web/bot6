@@ -90,6 +90,8 @@ class ScanningStateMixin:
                     min_drop = trading_config.get('drop_threshold', 0.65)
                     min_drop = max(min_drop, 0.5)
                     if drop < min_drop: continue
+                    if self._lot_too_coarse(symbol, price_now, drop, trading_config):
+                        continue
                     # Lightweight candidate: no OHLCV, no analyzer, no correlation yet.
                     # Sort by drop% as a proxy for urgency.
                     composite_score = drop * proxy_rvol if proxy_rvol > 0 else drop
@@ -114,6 +116,32 @@ class ScanningStateMixin:
         else:
             logger.info(f"@BG_SCAN_STATS@ checked={len(symbols)} candidates=0")
         return candidates[:5]
+
+    LOT_COARSE_LOG_SEC = 600
+
+    def _lot_too_coarse(self, symbol: str, ask: float, drop: float, trading_config: dict) -> bool:
+        """TZ-14: one lot step worth more than `max_lot_step_pct` % of the slot.
+
+        The fee is taken in the coin and the remainder below one lot step is
+        unsellable, so every round trip leaks up to `step * price` as dust no matter
+        how the buy is rounded (QNT: $0.19 = 3.2% of a $6 slot, above the TP).
+        Unknown step (no market) -> not filtered here; _entry_sellable still guards.
+        """
+        markets = getattr(getattr(self.exchange, 'exchange', None), 'markets', None) or {}
+        step = safe_float(((markets.get(symbol) or {}).get('precision') or {}).get('amount'))
+        slot = safe_float(trading_config.get('slot_size'))
+        if step <= 0 or slot <= 0 or ask <= 0:
+            return False
+        pct = step * ask / slot * 100
+        if pct <= trading_config.get('max_lot_step_pct', 0.5):
+            return False
+        logged = self.__dict__.setdefault('_lot_coarse_logged', {})
+        now = time.time()
+        if now - logged.get(symbol, 0.0) >= self.LOT_COARSE_LOG_SEC:
+            logged[symbol] = now
+            logger.info(f"@LOT_TOO_COARSE@ {symbol} step=${step * ask:.4f} = {pct:.2f}% of slot ${slot:g}")
+            self._log_rejected_candidate({'symbol': symbol, 'drop': drop}, 'lot_coarse', None, None)
+        return True
 
     def _validate_candidate(self, candidate, btc_trend, btc_change_1h):
         """Heavy validation for a single candidate (REST + analyzer + correlation)."""

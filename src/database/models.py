@@ -4,6 +4,7 @@ SQLite database for trade logging and statistics
 """
 
 import sqlite3
+import threading
 import time
 from typing import Dict, List
 import sys
@@ -40,6 +41,9 @@ class TradeDatabase:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or TRADES_DB
         self._conn: sqlite3.Connection | None = None
+        # Writes come from the main loop and the background scanner (TZ-14
+        # lot_coarse rows); one lock keeps lastrowid and commits per-statement.
+        self._write_lock = threading.Lock()
         self.setup_database()
         self._ensure_connection()
     
@@ -154,25 +158,10 @@ class TradeDatabase:
     def log_trade(self, symbol: str, side: str, amount: float, price: float, confidence: float = 0.0, profit: float = 0.0) -> int:
         """Log a trade to database using persistent connection. Returns the trade row id."""
         try:
-            self._ensure_connection()
-            if self._conn:
-                cursor = self._conn.cursor()
-                cursor.execute('''
-                    INSERT INTO trades (symbol, side, amount, price, timestamp, confidence, profit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (symbol, side, amount, price, time.time(), confidence, profit))
-                self._conn.commit()
-                trade_id = cursor.lastrowid
-            else:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO trades (symbol, side, amount, price, timestamp, confidence, profit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (symbol, side, amount, price, time.time(), confidence, profit))
-                conn.commit()
-                trade_id = cursor.lastrowid
-                conn.close()
+            trade_id = self._execute_write('''
+                INSERT INTO trades (symbol, side, amount, price, timestamp, confidence, profit)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (symbol, side, amount, price, time.time(), confidence, profit))
             logger.info(f"Trade logged: {side} {symbol} id={trade_id} profit=${profit:.2f}")
             return trade_id
         except Exception as e:
@@ -249,20 +238,21 @@ class TradeDatabase:
 
     def _execute_write(self, sql: str, vals) -> int:
         """Run one write on the persistent connection (or a one-off one); returns lastrowid."""
-        self._ensure_connection()
-        if self._conn:
-            cursor = self._conn.cursor()
-            cursor.execute(sql, vals)
-            self._conn.commit()
-            return cursor.lastrowid
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, vals)
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        with self._write_lock:
+            self._ensure_connection()
+            if self._conn:
+                cursor = self._conn.cursor()
+                cursor.execute(sql, vals)
+                self._conn.commit()
+                return cursor.lastrowid
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql, vals)
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
 
     def get_session_stats(self, since_ts: float = 0) -> Dict:
         """

@@ -753,21 +753,35 @@ class TradingBot(
     # ------------------------------------------------------------------
     # Capital Router
     # ------------------------------------------------------------------
+    def _update_dust_gauge(self, holdings: Dict[str, float]) -> None:
+        """TZ-14: hydra_dust_usdt = value of every non-USDT coin at or below its
+        dust threshold (fee-in-coin remainders the bot can never sell). Coins with
+        no spot market (threshold inf) are not ours and are not priced."""
+        dust = 0.0
+        for coin, amount in holdings.items():
+            symbol = f"{coin}/USDT"
+            threshold = self._dust_threshold(symbol)
+            if threshold != float('inf') and amount <= threshold:
+                dust += amount * self._approx_price(symbol)
+        METRICS.dust_usdt.set(dust)
+
     def _evaluate_capital(self) -> None:
         """Fetch balance and update CapitalRouter allocation."""
         try:
             self._last_capital_eval = time.time()
             trading_config = self.config.get_trading_config()
+            holdings = None
             if trading_config.get('dry_run', False):
                 # In dry-run use a virtual balance
                 balance_usdt = 1000.0
             else:
-                balance_usdt = self.exchange.get_free_usdt()
-                if balance_usdt is None:
+                snapshot = self.exchange.balance_snapshot()
+                if snapshot is None:
                     # Unknown balance: keep the previous CapitalRouter decision rather
                     # than pushing 0 (which flipped mode to 'frozen' on every hiccup).
                     logger.warning("@CAPITAL_EVAL_SKIP@ balance unknown, keeping previous allocation")
                     return
+                balance_usdt, holdings = snapshot
 
             self.balance = balance_usdt
             base_slot = trading_config.get('slot_size', 12.0)
@@ -784,6 +798,9 @@ class TradingBot(
             # Effective limit, not the router cap alone (B-26: Grafana showed 2 while 1 applied)
             METRICS.grid_max_levels.set(min(int(self.hydra_net_config.get('max_grid_levels', 3)), state.max_grid_levels))
             METRICS.capital_mode.info({'mode': state.mode})
+            # Last: pricing dust may hit REST for coins outside the WS universe.
+            if holdings is not None:
+                self._update_dust_gauge(holdings)
         except Exception as e:
             logger.error(f"@CAPITAL_EVAL_ERROR@ {e}")
 

@@ -156,6 +156,21 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   otherwise ATR from the grid's 60 s cache (`_grid_atr`). Left open: `get_coin_balance` + `fetch_order`
   are still 2 REST/s per position — acceptable, but a 2–3 s poll interval would be kinder to rate limits.
 
+- [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
+  `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →
+  `health_status=0` → `@WATCHDOG_RESTART@`. Bybit pushes a spot ticker only on change; BILL/BSB/OPG-class pairs
+  do not tick for 10 s in a quiet minute — 56 single misses per day, the triple happened once. The WS was alive
+  (no `@WS_ERR@` around it). Recovery worked (`@RECOVER@ Found 2 open orders` → BUYING), but it is B-21 again.
+  Done 2026-10-26: `tickers_cache` is informational (excluded from `overall`, gauge `hydra_tickers_fresh_ratio`,
+  alert `TickersStale` < 0.5 for 5 m); the hard check stays `exchange_api` (no data at all for 60 s); the listener
+  reconnects itself on 30 s without any frame (`@WS_STALL@`, `WSStall` through the normal reconnect path).
+  README §6.3 "never reduce the 95%/10 s threshold" — the threshold is unchanged, its consequence is.
+- [x] B-31 **`amend_order` never existed in ccxt** (`'bybit' object has no attribute 'amend_order'` ×6 per chase):
+  the limit-chase re-peg and `@GRID_REPRICE@` failed on every call, so a chase sat at its first ask for the whole
+  window and fell to the market backstop (12 chases → 4 fills, 8 backstops in one demo day). Tests mocked the
+  wrapper, never ccxt. Done 2026-10-26: `BybitClient.amend_order` calls `edit_order(id, symbol, 'limit', side,
+  amount, price)`; test uses `MagicMock(spec=[...])` so a non-existent ccxt method fails again.
+
 ## Done
 
 - [x] 2026-10-18 grid: `GRID_END` gives the position its own `buy_time` (was first fill → hard-exit fired 6 s after

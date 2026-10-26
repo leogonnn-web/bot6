@@ -18,6 +18,10 @@ from logger_setup import logger
 from utils import safe_float
 
 
+class WSStall(Exception):
+    """Public WebSocket delivered no frames for stall_timeout_sec."""
+
+
 class WebSocketListener:
     """Raw WebSocket listener for Bybit V5 real-time ticker updates with auto-reconnect"""
 
@@ -46,6 +50,12 @@ class WebSocketListener:
         self.max_reconnect_attempts = 10
         self._reconnect_count = 0
         self._last_reconnect_time = 0.0
+        # Silent-stall guard: with 127 symbols x 3 topics a live subscription
+        # delivers frames every few ms. No frame at all for this long means the
+        # subscription died while the TCP connection (and its protocol-level
+        # pings) stayed up — reconnect instead of serving a frozen cache (B-30).
+        self.stall_timeout_sec = 30.0
+        self.last_frame_ts = 0.0
 
         # publicTrade aggregator (for ToxicFlowFilter).
         # Per-symbol ring buffer of recent trades (last 200 events) for
@@ -283,10 +293,11 @@ class WebSocketListener:
 
                     self.ws_active = True
                     self._reconnect_count = 0
+                    self.last_frame_ts = time.time()
 
-                    async for message in ws:
-                        if not self.ws_running:
-                            break
+                    while self.ws_running:
+                        message = await self._recv_or_stall(ws)
+                        self.last_frame_ts = time.time()
                         try:
                             msg = json.loads(message)
                             # Bybit heartbeat (JSON frame)
@@ -349,6 +360,18 @@ class WebSocketListener:
                 delay = min(self.reconnect_interval_sec * (2 ** (self._reconnect_count - 1)), 60)
                 logger.info(f"@WS_RECONNECT@ Attempt {self._reconnect_count}/{self.max_reconnect_attempts} in {delay}s")
                 await asyncio.sleep(delay)
+
+    async def _recv_or_stall(self, ws):
+        """Next frame, or WSStall after `stall_timeout_sec` of silence.
+
+        Raised inside the connection block, so the generic reconnect path
+        (@WS_ERR@ -> backoff -> new connection) handles it like any other drop.
+        """
+        try:
+            return await asyncio.wait_for(ws.recv(), timeout=self.stall_timeout_sec)
+        except asyncio.TimeoutError:
+            logger.warning(f"@WS_STALL@ no frames for {self.stall_timeout_sec:.0f}s -> reconnect")
+            raise WSStall(f"no frames for {self.stall_timeout_sec:.0f}s")
 
     def _run_websocket_async(self, symbols: List[str]):
         """Run async WebSocket loop in daemon thread"""
@@ -703,6 +726,11 @@ class BybitClient:
         Retries on DDOS/Rate Limit errors with exponential backoff.
         `side` must match the resting order (it was hardcoded to 'buy' and used
         for sell-side limit chases).
+
+        ccxt's method is `edit_order` (POST /v5/order/amend). This used to call
+        `self.exchange.amend_order`, which does not exist in ccxt: every re-peg
+        failed with AttributeError, so the limit-chase sat at its first price
+        for the whole window and fell to the market backstop (B-31).
         """
         max_retries = 3
         base_delay = 0.5
@@ -713,13 +741,8 @@ class BybitClient:
                 price_str = self.exchange.price_to_precision(symbol, price)
                 logger.debug(f"@AMEND_ORDER@ Amend {order_id} -> {symbol} {side} @ ${price_str} (attempt {attempt + 1}/{max_retries})")
                 
-                return self.exchange.amend_order(
-                    id=order_id,
-                    symbol=symbol,
-                    type='limit',
-                    side=side,
-                    amount=float(amt_str),
-                    price=float(price_str)
+                return self.exchange.edit_order(
+                    order_id, symbol, 'limit', side, float(amt_str), float(price_str)
                 )
             except Exception as e:
                 error_str = str(e).lower()

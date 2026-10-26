@@ -124,6 +124,10 @@ class _Metrics:
             'hydra_health_status',
             'Health check status (1=healthy, 0=degraded)',
         )
+        self.tickers_fresh_ratio = Gauge(
+            'hydra_tickers_fresh_ratio',
+            'Share of cached tickers updated within 10 s (informational, never a restart trigger)',
+        )
         self.heartbeat_timestamp = Gauge(
             'hydra_heartbeat_timestamp',
             'Unix timestamp of last main loop iteration',

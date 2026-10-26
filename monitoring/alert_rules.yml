@@ -78,6 +78,17 @@ groups:
           summary: "Bot state held longer than its config limit"
           description: "See hydra_bot_state / hydra_state_age_seconds. Open grid past hard_exit, or exit_halted waiting for manual action — check @STATE_LONG@ in the bot log."
 
+      # Price feed mostly stale for 5 minutes (B-30: informational check, the
+      # watchdog never restarts on it; the listener reconnects on a silent stall)
+      - alert: TickersStale
+        expr: hydra_tickers_fresh_ratio < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than half of the WS tickers are fresh"
+          description: "hydra_tickers_fresh_ratio={{ $value }} for 5m. Check @WS_STALL@/@WS_RECONNECT@ in the bot log."
+
       # No scan cycles for 5 minutes
       - alert: ScanCyclesStopped
         expr: rate(hydra_scan_cycles_total[5m]) == 0

@@ -66,7 +66,14 @@ class HealthChecker:
         # Surfaced via @STATE_LONG@, hydra_state_stuck and the BotStateStuck alert.
         stuck = not report['checks']['state_stuck']
         METRICS.state_stuck.set(1.0 if stuck else 0.0)
-        report['overall'] = all(v for k, v in report['checks'].items() if k != 'state_stuck')
+        # tickers_cache is informational too (B-30): Bybit pushes a ticker only
+        # when the price changes, so in a quiet minute >5% of 127 symbols simply
+        # do not tick within 10 s. Three such minutes in a row (56 single misses
+        # a day on demo) made the watchdog restart a bot with an open grid. A
+        # dead feed is caught by exchange_api (no data at all for 60 s) and the
+        # listener's own stall reconnect; here it is only a gauge.
+        METRICS.tickers_fresh_ratio.set(self._tickers_fresh_ratio())
+        report['overall'] = all(v for k, v in report['checks'].items() if k not in ('state_stuck', 'tickers_cache'))
 
         if not report['overall']:
             self.consecutive_fails += 1
@@ -114,13 +121,17 @@ class HealthChecker:
     # ------------------------------------------------------------------
     # 2. HARDENED tickers freshness — >=95% within 10 seconds
     # ------------------------------------------------------------------
-    def _check_tickers_cache(self) -> bool:
+    def _tickers_fresh_ratio(self) -> float:
         cache = getattr(self.bot, 'ws_tickers_cache', {})
         if not cache:
-            return False
+            return 0.0
         now = time.time()
-        fresh_count = sum(1 for v in cache.values() if now - v.get('timestamp', 0) <= 10)
-        ratio = fresh_count / len(cache)
+        return sum(1 for v in cache.values() if now - v.get('timestamp', 0) <= 10) / len(cache)
+
+    def _check_tickers_cache(self) -> bool:
+        """Informational since B-30 — reported in the check dict and as
+        hydra_tickers_fresh_ratio, excluded from `overall`."""
+        ratio = self._tickers_fresh_ratio()
         ok = ratio >= 0.95
         if not ok:
             logger.debug(f"Health: tickers fresh {ratio*100:.0f}% (< 95% within 10s)")

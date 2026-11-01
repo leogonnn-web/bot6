@@ -582,6 +582,7 @@ class TradingBot(
                 score=df.get('score', 0.0),
                 mode=df.get('mode', 'normal'),
                 profit=profit, take_profit_pct=tp_pct,
+                idle_bars=df.get('idle_bars'),
                 # Scan-time liquidity / exit-rule context (TZ-12A)
                 **{k: df.get(k) for k in self.trade_db.DF_CONTEXT_COLUMNS},
             )

@@ -72,6 +72,10 @@ class TradingConfig(BaseModel):
     allowed_hours: Optional[List[int]] = Field(default=None, description="Allowed trading hours 0-23")
     max_lot_step_pct: float = Field(default=0.5, gt=0.0,
                                     description="Skip symbols whose lot step costs more than this % of slot_size")
+    idle_bars_max: int = Field(default=10, ge=0,
+                               description="TZ-21: refuse a candidate with at least this many empty 1m bars in the last hour (0 = log only)")
+    idle_bars_warn: int = Field(default=6, ge=0,
+                                description="TZ-21: @IDLE_CANDLES_WARN@ from this many empty bars (0 = off)")
 
 
 class HydraNetConfig(BaseModel):

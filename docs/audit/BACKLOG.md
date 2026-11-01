@@ -156,7 +156,7 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   otherwise ATR from the grid's 60 s cache (`_grid_atr`). Left open: `get_coin_balance` + `fetch_order`
   are still 2 REST/s per position — acceptable, but a 2–3 s poll interval would be kinder to rate limits.
 
-- [ ] B-32 **Фильтр ликвидности по «пустым свечам» (напоминание оператора, 2026-10-26).** Цель: не входить
+- [x] B-32 **Фильтр ликвидности по «пустым свечам» (напоминание оператора, 2026-10-26).** Цель: не входить
   в монеты, где торги фактически остановлены, и не висеть в сделке. Идея: перед входом проверять 1m-свечи
   за последний час; если ≥ 2 бара «пустые» — пропустить символ. «Пустая» (ИЛИ): `volume == 0`; или
   `high == low` / `open == close` при минимальном объёме (доджи без тела). Отказ → `reject_reason='idle_candles'`
@@ -164,6 +164,14 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   `fetch_ohlcv(1m, limit=60)` до фильтров — реализация почти бесплатная. **Сначала измерить**: из отчёта
   TZ-13C видно, какие `reject_reason` и исходы у плоских/мёртвых пар; если `timeout`/panic у вошедших не
   коррелирует с пустыми свечами — фильтр не нужен. Кандидат на порог: `trading.max_idle_candles_1h` (default 2).
+  Done 2026-11-01 (TZ-21). Measured first on the 33 real demo entries (public 1m klines, hour before entry):
+  all 3 panics (BAT ×2, BSB) had 11–43 idle bars, no panic below 10; blocked group at any threshold net
+  negative (−0.19), kept group positive (+0.07); threshold 2 catches PEPE/LIT/MNT on tick discreteness alone.
+  Criterion `open==close & tiny volume` added nothing beyond `volume==0 ∨ high==low` and was dropped.
+  Implementation: `indicators/dump_features.idle_bar_count` (closed bars only, <50 bars = fully idle),
+  column `idle_bars` on every `dispatcher_features` row, gate `trading.idle_bars_max` (10 → `reject_reason=
+  'idle_candles'`, `@IDLE_CANDLES@`), `trading.idle_bars_warn` (6 → `@IDLE_CANDLES_WARN@`, passes).
+  Open: in-position liveness (`@SYMBOL_IDLE@` from the publicTrade buffer) — log only, after TZ-13C.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

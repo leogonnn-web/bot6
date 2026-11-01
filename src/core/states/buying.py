@@ -37,6 +37,7 @@ class BuyingStateMixin:
                         btc_1h=df.get('btc_1h', 0.0),
                         score=df.get('score', 0.0),
                         mode=df.get('mode', 'normal'),
+                        idle_bars=df.get('idle_bars'),
                         # Scan-time liquidity / exit-rule context (TZ-12A)
                         **{k: df.get(k) for k in self.trade_db.DF_CONTEXT_COLUMNS},
                     )

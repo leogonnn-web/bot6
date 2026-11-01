@@ -10,6 +10,7 @@ from metrics import METRICS
 
 from ..state_enum import BotState
 import indicators.matrix as _ind_matrix
+from indicators.dump_features import idle_bar_count
 
 
 class ScanningStateMixin:
@@ -165,18 +166,32 @@ class ScanningStateMixin:
                     real_rvol = min(synthetic, 10.0)
                     logger.info(f"@RVOL_FALLBACK@ {symbol} synthetic RVOL={real_rvol:.2f}x (proxy=${proxy:,.0f}, avg_15s=${avg_15s:,.0f})")
         trading_config = self.config.get_trading_config()
+        # TZ-21 (B-32): empty 1m candles in the last hour = a coin nobody trades.
+        # RVOL cannot catch these вЂ” a dead baseline makes one stray order look like
+        # a 5-10x volume spike. All three demo panics (BAT x2, BSB) had 11-43 idle
+        # bars; no panic below 10. The count is recorded on every row (pass or
+        # reject) so TZ-13C can measure the gate against all candidates.
+        idle = idle_bar_count(ohlcv)
+        idle_max = int(trading_config.get('idle_bars_max', 0) or 0)
+        idle_warn = int(trading_config.get('idle_bars_warn', 0) or 0)
+        if idle_max > 0 and idle >= idle_max:
+            logger.info(f"@IDLE_CANDLES@ {symbol}: {idle}/{len(ohlcv) - 1} empty 1m bars >= {idle_max} -> skip")
+            self._log_rejected_candidate(candidate, 'idle_candles', real_rvol, btc_change_1h, idle_bars=idle)
+            return None
+        if idle_warn > 0 and idle >= idle_warn:
+            logger.info(f"@IDLE_CANDLES_WARN@ {symbol}: {idle}/{len(ohlcv) - 1} empty 1m bars (limit {idle_max or 'off'}), continuing")
         min_rvol = trading_config.get('min_rvol_threshold', 1.5)
         if real_rvol < min_rvol:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: RVOL={real_rvol:.2f}x < {min_rvol}x")
             self._add_to_rejected_cache(candidate, "rvol_low")
-            self._log_rejected_candidate(candidate, 'rvol_low', real_rvol, btc_change_1h)
+            self._log_rejected_candidate(candidate, 'rvol_low', real_rvol, btc_change_1h, idle_bars=idle)
             return None
         # Filter: shallow drop + low RVOL = weak momentum / fake-out
         drop_pct = candidate.get('drop', 0)
         if drop_pct < 1.0 and real_rvol < 2.0:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: shallow drop={drop_pct:.2f}% < 1.0% and RVOL={real_rvol:.2f}x < 2.0x")
             self._add_to_rejected_cache(candidate, "shallow_drop")
-            self._log_rejected_candidate(candidate, 'shallow_drop', real_rvol, btc_change_1h)
+            self._log_rejected_candidate(candidate, 'shallow_drop', real_rvol, btc_change_1h, idle_bars=idle)
             return None
         market_config = self.config.get_market_conditions_config()
         analysis = None
@@ -189,38 +204,38 @@ class ScanningStateMixin:
                 )
                 if analysis.get('status', '') != 'ok':
                     logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: analyzer status={analysis.get('status', 'unknown')}")
-                    self._log_rejected_candidate(candidate, 'analyzer_status', real_rvol, btc_change_1h)
+                    self._log_rejected_candidate(candidate, 'analyzer_status', real_rvol, btc_change_1h, idle_bars=idle)
                     return None
             except Exception as e:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: analyzer exception: {e}")
-                self._log_rejected_candidate(candidate, 'analyzer_error', real_rvol, btc_change_1h)
+                self._log_rejected_candidate(candidate, 'analyzer_error', real_rvol, btc_change_1h, idle_bars=idle)
                 return None
             base_threshold = trading_config.get('min_confidence_threshold', 60.0)
             base_threshold = max(base_threshold, 20.0)
             conf = analysis.get('confidence', 0)
             if analysis['recommendation'] not in ['STRONG_BUY', 'BUY']:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: rec={analysis['recommendation']}")
-                self._log_rejected_candidate(candidate, 'rec', real_rvol, btc_change_1h, conf)
+                self._log_rejected_candidate(candidate, 'rec', real_rvol, btc_change_1h, conf, idle_bars=idle)
                 return None
             if conf < base_threshold:
                 logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: conf={conf:.1f}% < {base_threshold}%")
                 self._add_to_rejected_cache(candidate, "conf_low")
-                self._log_rejected_candidate(candidate, 'conf_low', real_rvol, btc_change_1h, conf)
+                self._log_rejected_candidate(candidate, 'conf_low', real_rvol, btc_change_1h, conf, idle_bars=idle)
                 return None
         else:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: indicators disabled")
-            self._log_rejected_candidate(candidate, 'indicators_off', real_rvol, btc_change_1h)
+            self._log_rejected_candidate(candidate, 'indicators_off', real_rvol, btc_change_1h, idle_bars=idle)
             return None
         if not self._check_btc_trend():
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: _check_btc_trend failed")
-            self._log_rejected_candidate(candidate, 'btc_trend', real_rvol, btc_change_1h, conf)
+            self._log_rejected_candidate(candidate, 'btc_trend', real_rvol, btc_change_1h, conf, idle_bars=idle)
             return None
         btc_correlation = self._calculate_btc_correlation(symbol)
         correlation_threshold = market_config.get('btc_correlation_threshold', 0.5)
         if btc_correlation < correlation_threshold:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: corr={btc_correlation:.2f} < {correlation_threshold}")
             self._add_to_rejected_cache(candidate, "corr_low")
-            self._log_rejected_candidate(candidate, 'corr_low', real_rvol, btc_change_1h, conf)
+            self._log_rejected_candidate(candidate, 'corr_low', real_rvol, btc_change_1h, conf, idle_bars=idle)
             return None
         # Defaults = "no dispatcher opinion": what the candidate carries when the
         # dispatcher is disabled or scoring failed.
@@ -247,7 +262,7 @@ class ScanningStateMixin:
                 context = self._candidate_context(ticker_data, bid_vol, ask_vol, dispatcher_mode)
                 scored = True
             else:
-                logger.debug(f"@DISPATCHER_DISABLED@ {symbol} — dispatcher not enabled")
+                logger.debug(f"@DISPATCHER_DISABLED@ {symbol} вЂ” dispatcher not enabled")
         except Exception as e:
             logger.info(f"@SCAN_REJECT_DETAIL@ {symbol}: dispatcher exception: {e}")
 
@@ -264,6 +279,7 @@ class ScanningStateMixin:
             'btc_1h': btc_change_1h,
             'score': dispatcher_score,
             'mode': dispatcher_mode,
+            'idle_bars': idle,
             **context,
         }
         # Phase 1: Log features to DB (feedback_loop = OFF)
@@ -287,10 +303,11 @@ class ScanningStateMixin:
         }
 
     def _log_rejected_candidate(self, candidate, reason: str, real_rvol: float,
-                                btc_change_1h: float, confidence: float = None) -> None:
+                                btc_change_1h: float, confidence: float = None,
+                                idle_bars: int = None) -> None:
         """TZ-13A: one dispatcher_features row per refused candidate, so offline
         labelling can tell what each filter cuts. Pure observation: never raises,
-        never changes the verdict. Score/mode stay NULL — the dispatcher never ran."""
+        never changes the verdict. Score/mode stay NULL вЂ” the dispatcher never ran."""
         if not getattr(self, 'trade_db', None):
             return
         symbol = candidate['symbol']
@@ -305,7 +322,7 @@ class ScanningStateMixin:
                 dump_depth=candidate.get('drop'),
                 obi_skew=(bid_vol - ask_vol) / total_vol if total_vol > 0 else 0.0,
                 btc_1h=btc_change_1h, score=None, mode=None,
-                reject_reason=reason,
+                reject_reason=reason, idle_bars=idle_bars,
                 **self._candidate_context(ticker_data, bid_vol, ask_vol, 'normal'),
             )
         except Exception as e:

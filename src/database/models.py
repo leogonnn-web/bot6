@@ -30,13 +30,14 @@ class TradeDatabase:
     )
     # TZ-13A: rejected candidates are logged too (reject_reason NULL = passed),
     # the scan winner is flagged; the last five are TZ-16 features, NULL for now.
+    # TZ-21: idle_bars = empty 1m candles in the hour before the signal.
     DF_OUTCOME_COLUMNS = (
         'reject_reason', 'picked', 'sigma_1m', 'dump_z', 'vol_decay',
-        'higher_low', 'sell_ratio',
+        'higher_low', 'sell_ratio', 'idle_bars',
     )
     DF_COLUMNS = ('profit', 'take_profit_pct') + DF_CONTEXT_COLUMNS + DF_OUTCOME_COLUMNS
     DF_TEXT_COLUMNS = ('bid_ask_source', 'source', 'reject_reason')
-    DF_COLUMN_TYPES = {'picked': 'INTEGER DEFAULT 0', 'higher_low': 'INTEGER'}
+    DF_COLUMN_TYPES = {'picked': 'INTEGER DEFAULT 0', 'higher_low': 'INTEGER', 'idle_bars': 'INTEGER'}
 
     def __init__(self, db_path: str = None):
         self.db_path = db_path or TRADES_DB
@@ -131,7 +132,8 @@ class TradeDatabase:
                     dump_z REAL,
                     vol_decay REAL,
                     higher_low INTEGER,
-                    sell_ratio REAL
+                    sell_ratio REAL,
+                    idle_bars INTEGER
                 )
             ''')
             # Migration: add columns missing on pre-existing tables. REAL unless
@@ -180,7 +182,7 @@ class TradeDatabase:
                                 reject_reason: str = None, picked: int = 0,
                                 sigma_1m: float = None, dump_z: float = None,
                                 vol_decay: float = None, higher_low: int = None,
-                                sell_ratio: float = None) -> int | None:
+                                sell_ratio: float = None, idle_bars: int = None) -> int | None:
         """Log dispatcher scoring features for post-trade analysis (feedback loop data).
 
         The TZ-12A parameters (spread_pct … source) default to None so older call
@@ -201,7 +203,7 @@ class TradeDatabase:
                 'spread_pct', 'bid_vol', 'ask_vol', 'turnover24h', 'bid_ask_source',
                 'tp_pct', 'sl_pct', 'hold_sec', 'entry_ask', 'source',
                 'reject_reason', 'picked', 'sigma_1m', 'dump_z', 'vol_decay',
-                'higher_low', 'sell_ratio',
+                'higher_low', 'sell_ratio', 'idle_bars',
             ]
             vals = [
                 trade_id, ts, symbol, confidence, rvol_spike,
@@ -210,7 +212,7 @@ class TradeDatabase:
                 spread_pct, bid_vol, ask_vol, turnover24h, bid_ask_source,
                 tp_pct, sl_pct, hold_sec, entry_ask, source,
                 reject_reason, picked, sigma_1m, dump_z, vol_decay,
-                higher_low, sell_ratio,
+                higher_low, sell_ratio, idle_bars,
             ]
             ph = ','.join('?' for _ in vals)
             sql = f"INSERT INTO dispatcher_features ({','.join(cols)}) VALUES ({ph})"

@@ -76,6 +76,16 @@ class TradingConfig(BaseModel):
                                description="TZ-21: refuse a candidate with at least this many empty 1m bars in the last hour (0 = log only)")
     idle_bars_warn: int = Field(default=6, ge=0,
                                 description="TZ-21: @IDLE_CANDLES_WARN@ from this many empty bars (0 = off)")
+    lockout_after_panic_min: int = Field(default=180, ge=0,
+                                         description="TZ-22: lock a symbol this long after its panic exit (0 = off)")
+    lockout_losses_count: int = Field(default=2, ge=0,
+                                      description="TZ-22: losing closes within the window that lock the symbol (0 = off)")
+    lockout_losses_window_min: int = Field(default=360, ge=0,
+                                           description="TZ-22: window for lockout_losses_count (0 = off)")
+    lockout_losses_duration_min: int = Field(default=720, ge=0,
+                                             description="TZ-22: loss-series lock length, from the last loss (0 = off)")
+    max_entries_per_symbol_6h: int = Field(default=3, ge=0,
+                                           description="TZ-22: max buys on one symbol in any 6 h (0 = off)")
 
 
 class HydraNetConfig(BaseModel):

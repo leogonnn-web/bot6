@@ -1,10 +1,11 @@
 """SCANNING state handler + market entry scanner."""
+import logging
 import time
 import sys
 import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared')))
-from logger_setup import logger
+from logger_setup import logger, log_every
 from utils import safe_float
 from metrics import METRICS
 
@@ -144,10 +145,67 @@ class ScanningStateMixin:
             self._log_rejected_candidate({'symbol': symbol, 'drop': drop}, 'lot_coarse', None, None)
         return True
 
+    LOCKOUT_LOG_SEC = 600
+
+    def _symbol_locked(self, symbol: str, trading_config: dict) -> str | None:
+        """TZ-22 (B-33): reason the symbol is locked out after losses, or None.
+
+        Truth is trades.db (every exit path already writes its close there), so the
+        lock survives restarts without a hook per exit. A key set to 0 turns its
+        rule off; an unreadable DB locks the symbol ('db_unknown', fail-closed).
+        """
+        def minutes(key):
+            return int(trading_config.get(key, 0) or 0) * 60
+
+        panic_sec = minutes('lockout_after_panic_min')
+        loss_count = int(trading_config.get('lockout_losses_count', 0) or 0)
+        loss_window = minutes('lockout_losses_window_min')
+        loss_lock = minutes('lockout_losses_duration_min')
+        max_entries = int(trading_config.get('max_entries_per_symbol_6h', 0) or 0)
+        losses_on = loss_count > 0 and loss_window > 0 and loss_lock > 0
+        if not (panic_sec or losses_on or max_entries):
+            return None
+        now = time.time()
+        db = getattr(self, 'trade_db', None)
+        reason, until = None, now
+        lookback = max(panic_sec, loss_window + loss_lock if losses_on else 0)
+        closes = []
+        if lookback:
+            closes = db.symbol_recent_closes(symbol, now - lookback) if db else None
+        if closes is None:
+            reason = 'db_unknown'
+        if reason is None and panic_sec:
+            panics = [ts for ts, side, _ in closes if side == 'sell_panic' and ts >= now - panic_sec]
+            if panics:
+                reason, until = 'panic', panics[-1] + panic_sec
+        if reason is None and losses_on:
+            losses = [ts for ts, _, profit in closes if (profit or 0.0) < 0]
+            ends = [losses[i] + loss_lock for i in range(loss_count - 1, len(losses))
+                    if losses[i] - losses[i - loss_count + 1] <= loss_window]
+            if ends and max(ends) > now:
+                reason, until = 'losses', max(ends)
+        if reason is None and max_entries:
+            entries = db.symbol_recent_entries(symbol, now - 6 * 3600) if db else None
+            if entries is None:
+                reason = 'db_unknown'
+            elif entries >= max_entries:
+                # Upper bound: the oldest of these entries may age out sooner.
+                reason, until = 'entries', now + 6 * 3600
+        if reason:
+            log_every(f'lockout_{symbol}', self.LOCKOUT_LOG_SEC,
+                      f"@SYMBOL_LOCKOUT@ {symbol} ({reason}) until "
+                      f"{time.strftime('%H:%M', time.gmtime(until))}Z", logging.INFO)
+        return reason
+
     def _validate_candidate(self, candidate, btc_trend, btc_change_1h):
         """Heavy validation for a single candidate (REST + analyzer + correlation)."""
         symbol = candidate['symbol']
         price_now = candidate['price']
+        trading_config = self.config.get_trading_config()
+        lock_reason = self._symbol_locked(symbol, trading_config)
+        if lock_reason:
+            self._log_rejected_candidate(candidate, 'symbol_lockout', None, btc_change_1h)
+            return None
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=60)
         except Exception as e:
@@ -165,7 +223,6 @@ class ScanningStateMixin:
                 if synthetic > 0:
                     real_rvol = min(synthetic, 10.0)
                     logger.info(f"@RVOL_FALLBACK@ {symbol} synthetic RVOL={real_rvol:.2f}x (proxy=${proxy:,.0f}, avg_15s=${avg_15s:,.0f})")
-        trading_config = self.config.get_trading_config()
         # TZ-21 (B-32): empty 1m candles in the last hour = a coin nobody trades.
         # RVOL cannot catch these вЂ” a dead baseline makes one stray order look like
         # a 5-10x volume spike. All three demo panics (BAT x2, BSB) had 11-43 idle

@@ -351,6 +351,38 @@ class TradeDatabase:
             logger.error(f"Error reading daily trades count: {e}")
             return 0
     
+    def _read(self, sql: str, vals):
+        """One read on the persistent connection; raises on DB failure."""
+        with self._write_lock:
+            self._ensure_connection()
+            if self._conn is None:
+                raise sqlite3.OperationalError("no DB connection")
+            return self._conn.execute(sql, vals).fetchall()
+
+    def symbol_recent_closes(self, symbol: str, since_ts: float) -> List[tuple] | None:
+        """TZ-22: (timestamp, side, profit) of closing sells on `symbol` since `since_ts`.
+
+        None on DB error — unknown is not "clean"; the caller fails closed.
+        """
+        try:
+            return self._read(
+                "SELECT timestamp, side, profit FROM trades "
+                "WHERE symbol = ? AND side IN ('sell', 'sell_panic') AND timestamp >= ? "
+                "ORDER BY timestamp", (symbol, since_ts))
+        except Exception as e:
+            logger.error(f"@DB_READ_ERROR@ symbol_recent_closes {symbol}: {e}")
+            return None
+
+    def symbol_recent_entries(self, symbol: str, since_ts: float) -> int | None:
+        """TZ-22: number of `buy` rows on `symbol` since `since_ts`; None on DB error."""
+        try:
+            return self._read(
+                "SELECT COUNT(*) FROM trades WHERE symbol = ? AND side = 'buy' AND timestamp >= ?",
+                (symbol, since_ts))[0][0]
+        except Exception as e:
+            logger.error(f"@DB_READ_ERROR@ symbol_recent_entries {symbol}: {e}")
+            return None
+
     def get_recent_trades(self, limit: int = 10) -> List[Dict]:
         """Get recent trades from database"""
         try:

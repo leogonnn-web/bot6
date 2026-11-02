@@ -79,6 +79,11 @@ class Config:
                 "max_lot_step_pct": 0.5,
                 "idle_bars_max": 10,
                 "idle_bars_warn": 6,
+                "lockout_after_panic_min": 180,
+                "lockout_losses_count": 2,
+                "lockout_losses_window_min": 360,
+                "lockout_losses_duration_min": 720,
+                "max_entries_per_symbol_6h": 3,
                 "partial_tp_size_pct": 50.0,
                 "move_to_breakeven": True,
                 "trailing_callback_pct": 0.8

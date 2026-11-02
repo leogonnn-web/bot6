@@ -123,6 +123,13 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   fire; `prometheus.yml` has no `alerting:` block → even live alerts (`BotStateStuck`, `BalanceLow`) reach nobody.
   Do between stages: wire the three metrics (or delete their rules), add delivery (Grafana Alerting → Telegram is the
   cheapest), test with a forced `hydra_state_stuck=1`. Must be closed before Stage 5 (real money).
+  Correction 2026-11-02 (server `/metrics` + `ALERTS[15d]`): latency and errors *are* written by
+  `OrderManager._execute_with_metrics` — `OrderErrorSpike` fired on the B-24/B-27 loops; only slippage was dead.
+  `ScanCyclesStopped` fired ~44 h of 15 days: scans stop by design while a grid is open.
+  Code 2026-11-02: rules moved to Grafana Alerting (`monitoring/grafana/provisioning/alerting/hydra_alerts.yml`,
+  Telegram contact point, env `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`); `alert_rules.yml` + `rule_files` removed;
+  `hydra_slippage_pct`, its rules and panel removed; new `DustHigh` (> 1.5 USDT, 30 m) and `BotDown` (`up==0`);
+  `ScanCyclesStopped` gated on IDLE/SCANNING. Open until a test alert is delivered on the server.
 
 - [x] B-24 **Breakeven sold the gross fill and looped with no TP** (demo stage 2, 2026-10-19, QNT): Bybit takes the
   buy fee in the coin (bought 0.03, held 0.02997); the grid mirrors the gross fill into `amount`. `_set_breakeven`

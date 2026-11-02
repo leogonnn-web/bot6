@@ -205,7 +205,7 @@ triada/
 ├── monitoring/
 │   ├── prometheus.yml               # Scrape config (:9090 bot)
 │   ├── grafana_dashboard.json       # 12-panel live dashboard
-│   └── alert_rules.yml              # 7 Prometheus alert rules
+│   └── grafana/provisioning/alerting/hydra_alerts.yml  # 9 alerts → Telegram (Grafana Alerting)
 │
 ├── terraform/                       # AWS Infrastructure as Code
 │   ├── main.tf                      # EC2, security groups

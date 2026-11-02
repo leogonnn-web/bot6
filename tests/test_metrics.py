@@ -15,9 +15,6 @@ class TestMetricsSingleton:
     def test_balance_gauge_exists(self):
         assert hasattr(METRICS, 'balance_usdt')
 
-    def test_slippage_histogram_exists(self):
-        assert hasattr(METRICS, 'slippage_pct')
-
     def test_bot_state_gauge_exists(self):
         assert hasattr(METRICS, 'bot_state')
 

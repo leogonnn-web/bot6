@@ -1,0 +1,220 @@
+# B-23: the single source of HYDRA alerts. Grafana evaluates the rules against
+# Prometheus and delivers to Telegram (prometheus.yml has no Alertmanager).
+# Provisioning interpolates env vars: never write a literal dollar sign here
+# (templates use the .Values / .Labels form; amounts are written as USDT).
+# Datasource uid = the one Grafana generated for "Prometheus", pinned in
+# datasources/prometheus.yml.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: telegram
+    receivers:
+      - uid: hydra-telegram
+        type: telegram
+        disableResolveMessage: false
+        settings:
+          bottoken: ${TELEGRAM_BOT_TOKEN}
+          chatid: ${TELEGRAM_CHAT_ID}
+          message: |-
+            {{ range .Alerts }}[{{ .Status }}] {{ .Labels.alertname }} ({{ .Labels.severity }})
+            {{ .Annotations.summary }}
+            {{ .Annotations.description }}
+
+            {{ end }}
+
+policies:
+  - orgId: 1
+    receiver: telegram
+    group_by: ['alertname']
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: hydra
+    folder: HYDRA
+    interval: 1m
+    rules:
+      # State older than its config-derived limit (health.py _state_limits).
+      # Operator alert only — the watchdog never restarts on this.
+      - uid: hydra-state-stuck
+        title: BotStateStuck
+        condition: C
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: Bot state held longer than its config limit
+          description: Open grid past hard_exit, or exit_halted waiting for manual action. See hydra_bot_state / hydra_state_age_seconds and @STATE_LONG@ in the bot log.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: hydra_state_stuck, instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
+
+      - uid: hydra-balance-critical
+        title: BalanceCriticallyLow
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: Balance below 15 USDT — Capital Router froze trading
+          description: 'USDT balance is {{ printf "%.2f" .Values.A.Value }}.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: hydra_balance_usdt, instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: lt, params: [15] } }] }
+
+      - uid: hydra-balance-low
+        title: BalanceLow
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: Balance below 25 USDT — grid disabled, single-shot only
+          description: 'USDT balance is {{ printf "%.2f" .Values.A.Value }}.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: hydra_balance_usdt, instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: lt, params: [25] } }] }
+
+      # TZ-14 gauge: fee-in-coin remainders the bot can never sell. Grows by
+      # design; at 1.5 USDT (a quarter of a 6 USDT slot) convert it on Bybit
+      # ("Convert small balances") — 15 days of demo peaked at 0.78.
+      - uid: hydra-dust-high
+        title: DustHigh
+        condition: C
+        for: 30m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: Unsellable dust above 1.5 USDT
+          description: 'hydra_dust_usdt = {{ printf "%.2f" .Values.A.Value }}. Equity leak not in trades.db — convert small balances on Bybit.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: hydra_dust_usdt, instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1.5] } }] }
+
+      # Fired on the B-24 / B-27 order loops (InvalidOrder, InsufficientFunds).
+      - uid: hydra-order-errors
+        title: OrderErrorSpike
+        condition: C
+        for: 3m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: Order error rate elevated
+          description: '{{ .Labels.side }} orders failing at {{ printf "%.2f" .Values.A.Value }}/s ({{ .Labels.error_type }}). Check @ORDER_ERROR@ in the bot log.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: 'sum by (side, error_type) (rate(hydra_order_errors_total[5m]))', instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.1] } }] }
+
+      - uid: hydra-order-latency
+        title: OrderLatencyHigh
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: Order latency p95 above 5 s
+          description: '{{ .Labels.side }} p95 = {{ printf "%.1f" .Values.A.Value }} s — exchange API degradation?'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: 'histogram_quantile(0.95, sum by (le, side) (rate(hydra_order_latency_seconds_bucket[5m])))', instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [5] } }] }
+
+      # Scans run only in IDLE/SCANNING; the old rule (no state gate) fired
+      # through every open grid — ~44 h of 15 days on demo.
+      - uid: hydra-scan-stopped
+        title: ScanCyclesStopped
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: No scan cycles for 10 min while IDLE/SCANNING
+          description: The main loop is alive but the scanner is not. Check @LOOP_ERROR@ / Traceback in the bot log.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: 'increase(hydra_scan_cycles_total[10m]) == 0 and on() max_over_time(hydra_bot_state[10m]) <= 1', instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [-1] } }] }
+
+      # B-30: informational, the watchdog never restarts on it.
+      - uid: hydra-tickers-stale
+        title: TickersStale
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: Less than half of the WS tickers are fresh
+          description: 'hydra_tickers_fresh_ratio = {{ printf "%.2f" .Values.A.Value }}. Check @WS_STALL@ / @WS_RECONNECT@ in the bot log.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: hydra_tickers_fresh_ratio, instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: lt, params: [0.5] } }] }
+
+      # Nothing above can fire while the bot is down (no series -> OK).
+      # Also fires on a deliberate stop — silence it in Grafana for planned work.
+      - uid: hydra-bot-down
+        title: BotDown
+        condition: C
+        for: 3m
+        noDataState: Alerting
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: Prometheus cannot scrape hydra-bot
+          description: The bot process or container is down and the watchdog has not brought it back. Check docker ps and triada-watchdog logs.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model: { refId: A, expr: 'up{job="hydra_bot"}', instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: lt, params: [1] } }] }

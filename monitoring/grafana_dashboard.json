@@ -128,20 +128,10 @@
         "fieldConfig": { "defaults": { "unit": "s" } }
       },
       {
-        "id": 12,
-        "title": "Slippage Distribution",
-        "type": "histogram",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-        "targets": [
-          { "expr": "rate(hydra_slippage_pct_bucket[5m])", "legendFormat": "{{le}}%" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "percent" } }
-      },
-      {
         "id": 13,
         "title": "Order Errors",
         "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
         "targets": [
           { "expr": "rate(hydra_order_errors_total[5m])", "legendFormat": "{{side}} — {{error_type}}" }
         ],

@@ -89,12 +89,19 @@ docker compose down -v
 ```
 
 ## Monitoring Alerts
-Alerts are configured in `monitoring/alert_rules.yml`:
-- **BalanceCriticallyLow** — balance < $15, trading frozen
-- **BalanceLow** — balance < $25, grid disabled
-- **OrderErrorSpike** — order failures > 0.1/s
-- **SlippageHigh** — avg slippage > 0.5%
-- **BotStateStuck** — state unchanged for 30min
+Grafana Alerting → Telegram, provisioned from `monitoring/grafana/provisioning/alerting/hydra_alerts.yml`
+(the only place alerts live; Prometheus has no rules and no Alertmanager). Requires `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID` in `.env` — `docker compose` refuses to start without them.
+- **BotStateStuck** — `hydra_state_stuck=1` (state past its config-derived limit)
+- **BalanceCriticallyLow** / **BalanceLow** — balance < $15 (frozen) / < $25 (grid disabled)
+- **DustHigh** — `hydra_dust_usdt` > $1.5 for 30 min: convert small balances on Bybit
+- **OrderErrorSpike** — order failures > 0.1/s per side/error type
+- **OrderLatencyHigh** — order p95 > 5 s
+- **ScanCyclesStopped** — no scans for 10 min while IDLE/SCANNING
+- **TickersStale** — fewer than half of WS tickers fresh for 5 min
+- **BotDown** — Prometheus cannot scrape the bot for 3 min (also on a deliberate stop — silence it in Grafana)
+
+Delivery test: Grafana → Alerting → Contact points → `telegram` → Test.
 
 ## Security Checklist
 - [ ] `.env` file has real API keys (never commit to git)

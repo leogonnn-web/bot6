@@ -179,6 +179,15 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   column `idle_bars` on every `dispatcher_features` row, gate `trading.idle_bars_max` (10 → `reject_reason=
   'idle_candles'`, `@IDLE_CANDLES@`), `trading.idle_bars_warn` (6 → `@IDLE_CANDLES_WARN@`, passes).
   Open: in-position liveness (`@SYMBOL_IDLE@` from the publicTrade buffer) — log only, after TZ-13C.
+  **Control point 2026-11-02 (26 h):** gate works (2189 rejects, all 38 entries `idle_bars ≤ 9`, BAT/BSB/ICNT blocked), entry
+  rate unchanged (~35/day — blocked candidates are replaced, single-position bot was never starved). Outcome effect not
+  visible: 6 panics / 36 closes, all on `idle_bars ≤ 7` (BEAM ×3, XPL, OP, TRUMP). The 33-entry correlation did not replicate;
+  the filter stays because it is free, not because it fixed losses.
+- [ ] B-33 **Repeated entries into one falling symbol** (demo 2026-11-02): BEAM/USDT 13 of 38 entries in 26 h while the coin
+  slid −15% all day — 8 TP × +$0.02, 3 panics (−0.22, −0.20, −0.11), one hard-exit −0.11, net ≈ −$0.35 of the day's −0.94.
+  Only guards today: `symbol_cooldown` 90 s and the global `cooldown_after_loss_minutes`. → **TZ-22**: per-symbol lockout from
+  `trades.db` (after a panic 3 h; ≥ 2 losses in 6 h → 12 h; ≤ 3 entries per symbol per 6 h), checked first in
+  `_validate_candidate`, `reject_reason='symbol_lockout'`, retro-run over the server DB as the acceptance test.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

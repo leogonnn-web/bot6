@@ -539,6 +539,66 @@ N < тысяч — случайное блуждание весов, меняю�
 
 ---
 
+## TZ-22 — Лок символа после убытков и потолок повторных входов (B-33)
+
+**Модель / режим:** дешёвая, low/medium. Образец исполнения — TZ-14 (`_lot_too_coarse` + `reject_reason`).
+**Файлы:** `src/database/models.py` (один новый метод), `src/core/states/scanning.py` (`_validate_candidate` — до `fetch_ohlcv`),
+`shared/config.json`, `shared/config.py` (дефолты), `shared/config_models.py` (`TradingConfig`), новый `tests/test_symbol_lockout.py`,
+`scripts/analysis/retro_symbol_lockout.py` (новый, только чтение).
+
+**Проблема (демо 02.11, 26 ч).** BEAM/USDT: 13 входов из 38 за сутки на монете, которая весь день шла вниз (0.0055 → 0.0047):
+8 TP по +$0.02, 3 паники (−0.22, −0.20, −0.11), один hard-exit −0.11 → нетто ≈ −$0.35 при дневном итоге −0.94.
+Защита сейчас — `symbol_cooldown` 90 с и общий `cooldown_after_loss_minutes` (всех символов). Бот ловит один и тот же нож
+тринадцать раз. Отдельно от стратегии входа это **концентрация риска в одном символе**, и её можно отсечь без новых признаков.
+
+**Проектные решения — не менять.**
+1. **Источник правды — `trades.db`, не память.** Выходов четыре (`PROFIT_TAKEN`/`LOSS_TAKEN` в `in_position.py`, `_on_grid_tp_filled`,
+   `_on_exit_filled`, `_resolve_exit_by_balance`); хук в памяти на каждый — лишний код и потерянное состояние при рестарте.
+   Все закрытия уже лежат в `trades` (`side IN ('sell','sell_panic')`, `profit`, `timestamp`). Никаких новых таблиц и полей `state_data`.
+2. **Где проверять — `_validate_candidate`, первой проверкой, до `fetch_ohlcv`.** Не в лёгком скане (127 символов × каждые 5 с →
+   лишние запросы к SQLite). Отказ → `reject_reason='symbol_lockout'`, в `rejected_cache` не класть.
+3. **Все пороги — ключи конфига, 0 = правило выключено.** Так каждое правило можно отключить по отдельности, не трогая код.
+
+**Шаги.**
+1. `models.py` → `symbol_recent_closes(symbol: str, since_ts: float) -> list[tuple[float, str, float]]`:
+   `SELECT timestamp, side, profit FROM trades WHERE symbol = ? AND side IN ('sell','sell_panic') AND timestamp >= ? ORDER BY timestamp`.
+   Для подсчёта входов: `symbol_recent_entries(symbol, since_ts) -> int` = `COUNT(*) ... side = 'buy'`. Оба — чтение через
+   persistent connection, как `get_daily_trades_count`; при ошибке БД — `None` (не пустой список: неизвестно ≠ «чисто»).
+2. `scanning.py` → `_symbol_locked(symbol, trading_config) -> str | None` (причина или `None`). Правила, в этом порядке:
+   - **после паники:** есть `sell_panic` за последние `lockout_after_panic_min` минут (default **180**) → `'panic'`;
+   - **серия убытков:** ≥ `lockout_losses_count` (default **2**) закрытий с `profit < 0` за `lockout_losses_window_min` (default **360**)
+     → лок на `lockout_losses_duration_min` (default **720**) от **последнего** убытка → `'losses'`;
+   - **потолок входов:** ≥ `max_entries_per_symbol_6h` (default **3**) `buy` за 360 мин → `'entries'`.
+   `None` из БД → считать залоченным с причиной `'db_unknown'` (fail-closed, как `_single_position_ok`).
+   Лог `@SYMBOL_LOCKOUT@ {symbol} ({reason}) until {HH:MM}Z` — через `log_every(key=f'lockout_{symbol}', 600)`, чтобы не спамить:
+   кандидат может приходить каждые 5 с.
+3. Вызов в `_validate_candidate` **до** `fetch_ohlcv`: `reason = self._symbol_locked(symbol, trading_config)`; если есть —
+   `_log_rejected_candidate(candidate, 'symbol_lockout', None, btc_change_1h)` и `return None`. `trading_config` читать до этого
+   (сейчас он читается после OHLCV — поднять строку выше, порядок остальных фильтров не менять).
+4. Конфиг: пять ключей в `shared/config.json` (значения из п.2), те же дефолты в `shared/config.py`, поля `int = Field(default=…, ge=0)`
+   в `TradingConfig`. `cooldown_after_loss_minutes` и `symbol_cooldown` **не трогать** — они про другое (глобальная пауза и дубль-вход).
+5. **Retro-проверка** `scripts/analysis/retro_symbol_lockout.py --db <path> --since <epoch>`: прогнать правила по реальным `trades`
+   (вход = `buy`, исход = следующее закрытие того же символа) и вывести: сколько входов было бы заблокировано каждым правилом,
+   их суммарный PnL, число паник среди них; и то же для оставшихся. Без ccxt, только SQLite. Это критерий приёмки, а не опция.
+6. Тесты (`tmp_path` SQLite, как в `test_mechanical_losses.py`): (a) паника 1 ч назад → лок, 4 ч назад → нет; (b) два убытка за
+   6 ч → лок, один → нет; лок истекает через `lockout_losses_duration_min` от последнего; (c) 3 `buy` за 6 ч → лок, 2 → нет;
+   (d) `0` в ключе выключает именно это правило; (e) БД вернула `None` → лок `'db_unknown'`; (f) `_validate_candidate` с локом:
+   `fetch_ohlcv` **не вызван**, одна строка `reject_reason='symbol_lockout'`; (g) порядок остальных фильтров не изменился
+   (существующие тесты `test_dispatcher_features.py`/`test_idle_candles.py` зелёные без правок).
+
+**Критерии.**
+- Retro по серверной БД за 25.10–02.11 (скачать `trades.db`, см. HANDOFF/скрипты контрольных точек): правило `panic` должно
+  блокировать входы BEAM 13:41 и 14:21 02.11 (−0.20, −0.11) и **не** блокировать 16:40 (+0.02). Числа — в отчёт.
+- `python -m pytest -q` зелёный; `grep -n "symbol_lockout" src/core/states/scanning.py` ≥ 2; `fetch_ohlcv` в `_validate_candidate`
+  стоит **после** вызова `_symbol_locked`.
+- После суток на демо: `@SYMBOL_LOCKOUT@` в логе, `symbol_lockout` — класс в сводке `reject_reason`, ни у одного символа
+  не более 3 входов за любые 6 ч (`SELECT symbol, COUNT(*) FROM trades WHERE side='buy' AND timestamp > ? GROUP BY symbol`).
+
+**Не трогать.** Пути выхода (`in_position.py`, `exiting.py`, `hydra_net.py`), `limits.py`, `_check_symbol_cooldown`, пороги других фильтров.
+**Отчёт:** таблица retro-проверки + вывод pytest + grep-проверки.
+
+---
+
 ## TZ-20 — Мультипозиция (2–3 слота)
 
 **Гейт:** TZ-18 и TZ-19 в основной линии ≥ 2 недели демо без `@PRIVATE_WS_DRIFT@`-инцидентов и `@STATE_SCHEMA_WARN@`; отчёт TZ-13C
@@ -560,6 +620,8 @@ N < тысяч — случайное блуждание весов, меняю�
 | 2 | **TZ-13A** лог отказов + колонки TZ-16 | шаг 1 без стоп-маркеров | деплой; ≥ 5 классов `reject_reason` за сутки | дешёвая |
 | 3 | **TZ-14** лот-фильтр, `hydra_dust_usdt`, partial-TP off | — | деплой вместе с шагом 2 | дешёвая |
 | 4 | **B-23** алерты: `hydra_state_stuck`, `BalanceLow`, новый `DustHigh` → Telegram через Grafana Alerting; мёртвые правила удалить | — | тестовый алерт доставлен | дешёвая |
+| 4a | **TZ-21** фильтр пустых свечей (вне очереди, по решению оператора; ✓ 2026-11-01) | retro на 33 входах | `@IDLE_CANDLES@` в логе, входы с `idle_bars < 10` — ✓ 02.11; эффект на паники не подтвердился, фильтр оставлен как бесплатный | сильная |
+| 4b | **TZ-22** лок символа после убытков (B-33, BEAM 13/38 входов) | — | retro по БД + сутки демо: ≤ 3 входа/символ/6 ч | дешёвая |
 | 5 | **TZ-13B** разметчик; прогон по серверной БД | ≥ 3 дня строк после шага 2 | таблицы `candidate_paths`/`candidate_outcomes` заполнены | дешёвая |
 | 6 | **TZ-15** вселенная по обороту | шаг 1 закрыт | деплой; сутки без роста `@PRICE_STALE@`/`@WS_RECONNECT@` | средняя |
 | 7 | **TZ-16** признаки в лог | шаг 2 задеплоен | колонки заполнены, входы не изменились | средняя |

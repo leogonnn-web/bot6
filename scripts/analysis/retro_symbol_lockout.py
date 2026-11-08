@@ -4,7 +4,7 @@ Read-only, SQLite only. Entry = a `buy` row; its outcome = the next closing
 sell (`sell` / `sell_panic`) on the same symbol. For each entry the rules see
 only closes and buys strictly before it, the same view the scanner has.
 
-    python scripts/analysis/retro_symbol_lockout.py --db trades.db --since 1761350400
+    python scripts/analysis/retro_symbol_lockout.py --db trades.db --since 1792886400   # 25.10.2026 00:00 UTC
 """
 import argparse
 import sqlite3

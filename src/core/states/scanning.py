@@ -204,7 +204,13 @@ class ScanningStateMixin:
         trading_config = self.config.get_trading_config()
         lock_reason = self._symbol_locked(symbol, trading_config)
         if lock_reason:
-            self._log_rejected_candidate(candidate, 'symbol_lockout', None, btc_change_1h)
+            # One row per symbol per LOCKOUT_LOG_SEC: a lock lasts hours and a falling
+            # symbol re-enters the top-3 every tick, which would flood dispatcher_features.
+            logged = self.__dict__.setdefault('_lockout_logged', {})
+            now = time.time()
+            if now - logged.get(symbol, 0.0) >= self.LOCKOUT_LOG_SEC:
+                logged[symbol] = now
+                self._log_rejected_candidate(candidate, 'symbol_lockout', None, btc_change_1h)
             return None
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=60)

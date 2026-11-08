@@ -157,6 +157,18 @@ def test_locked_candidate_skips_ohlcv_and_logs_one_row(analyzer_ok, db, caplog, 
     assert _df_rows(db, "reject_reason, symbol, btc_1h") == [('symbol_lockout', SYM, -0.3)]
 
 
+def test_repeated_locked_candidate_logs_one_row_per_interval(analyzer_ok, db, monkeypatch):
+    _trade(db, 'sell_panic', 1, -0.2)
+    s = _scanner(db)
+    s.exchange.fetch_ohlcv = lambda *a, **k: pytest.fail("fetch_ohlcv must not be called")
+    for _ in range(3):
+        assert s._validate_candidate(dict(CANDIDATE), 'neutral', 0.0) is None
+    assert _df_rows(db, "reject_reason") == [('symbol_lockout',)]
+    s._lockout_logged[SYM] -= s.LOCKOUT_LOG_SEC                  # interval elapsed
+    assert s._validate_candidate(dict(CANDIDATE), 'neutral', 0.0) is None
+    assert _df_rows(db, "reject_reason") == [('symbol_lockout',)] * 2
+
+
 def test_unlocked_candidate_passes(analyzer_ok, db):
     _trade(db, 'sell', 1, +0.02)
     res = _scanner(db)._validate_candidate(dict(CANDIDATE), 'neutral', 0.0)

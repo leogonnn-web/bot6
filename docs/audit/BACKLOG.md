@@ -212,6 +212,20 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   Consequence: realized PnL since `session_start_ts` (2026-10-25) is −$7.88 (190 trades; −$3.23 without FIL) <
   −12% of free USDT ($6.41) → `@RISK_CAPITAL_LOCK@`, no new entries. Operator decides: new `session_start_ts`
   baseline (the FIL loss is downtime, not strategy) or keep the lock.
+  Operator's decision 2026-11-15: new baseline, server `session_start_ts` = 1794757937 (15:52 UTC) → `@RISK_OK@`.
+- [ ] B-35 **Exits are not the lever: the entries earn about one round-trip fee** (replay 2026-11-15,
+  `scripts/analysis/replay_exits.py`, 189 real round trips 25.10–04.11 from the exchange execution history, 1m klines).
+  Real: net −3.07 USDT on 1591 USDT bought; fees ≈ 3.18 → gross ≈ +0.11. The model with the live parameters
+  reproduces it (−2.89, same win/not-win verdict on 170 of 183, avg win/loss +0.023/−0.113 vs +0.023/−0.114).
+  144 exit variants (TP by mode/0.5/0.8/1.0/1.5/2.0 × stop 0.8/1.2/2.0/3.0 × grid on/off × breakeven on/off ×
+  hard exit 30/60/120 m): two are above zero (+0.5, grid + TP 2% + stop 2–3% + 60 m) and both lose in the second
+  half of the sample; everything else is −0.1…−3.1. A TP floor alone (live lifecycle, stop 1.2%): 0.8% → −3.00,
+  1.5% → −2.18 on 134 trades = the same −0.016 per trade as now. A wider stop is the only consistent effect
+  (1.2% → 3%: −2.89 → −0.84) and its tail risk is not in a 7-day sample. Price after entry: mean +0.11% at 5 m,
+  +0.28% at 30 m, +0.19% at 120 m; +0.5% is reached within 30 m by 56% of entries, +0.8% by 41%, +1.5% by 19%.
+  → Next lever is entry selection (which `dispatcher_features` predict the forward return, incl. the 24k rejected
+  candidates), not TP/stop tuning. 1m limit: the rest of the entry minute is reduced to its close; intrabar
+  stop-vs-TP ambiguity occurred in 0 bars after the entry minute.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

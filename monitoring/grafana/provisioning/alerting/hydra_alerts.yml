@@ -14,11 +14,16 @@ contactPoints:
         type: telegram
         disableResolveMessage: false
         settings:
-          # Quoted on purpose: after env interpolation a bare chat id is a YAML
-          # number and Grafana refuses to start ("cannot unmarshal number into
-          # Go struct field Config.chatid of type string", seen on deploy 2026-11-08).
+          # chatid is a block scalar on purpose. Grafana expands env vars after
+          # parsing the YAML and re-types an all-digit result to a number, then
+          # refuses to start ("cannot unmarshal number into Go struct field
+          # Config.chatid of type string", deploy 2026-11-08). Quotes do not
+          # help; the trailing newline of `|` keeps the value a string
+          # (grafana/grafana#69950, fixed upstream only in mid-2026 releases).
+          # Do NOT do the same to bottoken: it goes into the request URL.
           bottoken: "${TELEGRAM_BOT_TOKEN}"
-          chatid: "${TELEGRAM_CHAT_ID}"
+          chatid: |
+            ${TELEGRAM_CHAT_ID}
           message: |-
             {{ range .Alerts }}[{{ .Status }}] {{ .Labels.alertname }} ({{ .Labels.severity }})
             {{ .Annotations.summary }}

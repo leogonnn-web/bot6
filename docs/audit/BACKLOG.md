@@ -117,7 +117,7 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
 - [x] B-22 Dry-run cancelled `virtual_*` order ids through the real API (`@ORDER_ERROR@ ... requires "apiKey"`).
   Done 2026-10-11: `BybitClient.cancel_order` short-circuits `virtual_*` ids — covers all nine call sites.
 
-- [ ] B-23 **Alerting is dead end-to-end** (found 2026-10-11 via `/api/v1/rules`): `hydra_order_errors_total`,
+- [x] B-23 **Alerting is dead end-to-end** (found 2026-10-11 via `/api/v1/rules`): `hydra_order_errors_total`,
   `hydra_order_latency_seconds`, `hydra_slippage_pct` are declared but never written (OrderManager only counts
   `order_total`; slippage never observed) → `OrderErrorSpike`, `OrderLatencyHigh`, `SlippageHigh/Critical` can never
   fire; `prometheus.yml` has no `alerting:` block → even live alerts (`BotStateStuck`, `BalanceLow`) reach nobody.
@@ -136,8 +136,8 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   `telegram` + 9 rules provisioned and healthy. The first delivery test returned `401 Unauthorized`: the bot token in
   the server `.env` was dead (`getMe` 401). Token replaced 2026-11-15 → delivery test through the contact point `ok`.
   The Alertmanager keeps the pre-provisioning config for a few seconds after a restart (one `Notify for alerts failed`
-  401 at +7 s with the old token); the next group flush, 5 min later, logged no failure. Left: operator confirms the
-  test message and the real `BotDown` alert in Telegram, then tick the box.
+  401 at +7 s with the old token); the next group flush, 5 min later, logged no failure.
+  Done 2026-11-15: operator confirmed both the test message and the real `BotDown` alert in Telegram.
 
 - [x] B-24 **Breakeven sold the gross fill and looped with no TP** (demo stage 2, 2026-10-19, QNT): Bybit takes the
   buy fee in the coin (bought 0.03, held 0.02997); the grid mirrors the gross fill into `amount`. `_set_breakeven`
@@ -204,6 +204,14 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   forever next to a losing position. Fix: for a stale file with a `symbol`, ask the exchange first (open orders /
   balance above `_dust_threshold`) and adopt the position if it is real; discard only a confirmed ghost. Test in
   `tests/test_startup_truth.py`. Before Stage 5.
+  Worked around by hand 2026-11-15 (operator's choice): `saved_at` refreshed (backup `hydra_state.json.bak.20261115`) →
+  `@RECOVER@ Holding 17.03543 FIL` → `@STOP_LOSS_HIT@` (−30.84%) → market exit 17.03 @ 0.6082, `sell_panic` −$4.65
+  (trade 9758). The TP had already been canceled on the exchange. The gap cost 2.4× the loss seen on 2026-11-08 (−$1.9).
+  Same day, outside `trades.db`: the operator's manual B3 position (44431 B3, would have tripped
+  `@SINGLE_POSITION_BLOCK@` forever) sold at market for 21.14 USDT and its untriggered stop order canceled.
+  Consequence: realized PnL since `session_start_ts` (2026-10-25) is −$7.88 (190 trades; −$3.23 without FIL) <
+  −12% of free USDT ($6.41) → `@RISK_CAPITAL_LOCK@`, no new entries. Operator decides: new `session_start_ts`
+  baseline (the FIL loss is downtime, not strategy) or keep the lock.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

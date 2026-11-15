@@ -226,6 +226,19 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   → Next lever is entry selection (which `dispatcher_features` predict the forward return, incl. the 24k rejected
   candidates), not TP/stop tuning. 1m limit: the rest of the entry minute is reduced to its close; intrabar
   stop-vs-TP ambiguity occurred in 0 bars after the entry minute.
+  **Follow-up 2026-11-15, `scripts/analysis/label_candidates.py`:** 24 221 scan-time rows (passed + rejected) →
+  2177 independent events (first per symbol per 15 min, 76 symbols), labelled from 1m klines. After a dump signal
+  the price is a coin flip: fwd 30 m mean +0.06% (median +0.02%), minus BTC over the same minutes −0.02%; best and
+  worst excursion within 30 m are symmetric (median +0.49% / −0.50%); 5 m after the signal it is lower (−0.02%).
+  The pipeline adds little: picked +0.21% (n=143, t=1.7), rejected `rvol_low` +0.11%, `conf_low` +0.10%;
+  `idle_candles` and `rec` do cut the worse ones (−0.02%). Dispatcher inputs do not predict the outcome: `score`
+  rho +0.02, RVOL / confidence / OBI / BTC 1h change sign between the halves. The only consistent (weak) signal is
+  the drop measured in the coin's own volatility (`dump_depth / sigma_60`, rho +0.08, same sign in both halves and
+  for 30/60 m), worth ≈ +0.1–0.2% gross in the top quintiles — still below the 0.2% fee. Rules picked on the first
+  half do not hold on the second; no symbol is above the fee in both halves. Columns `sigma_1m`, `dump_z`,
+  `vol_decay`, `higher_low`, `sell_ratio` exist but are never written (0 of 24 221). Next: the trigger can be
+  rebuilt from public 1m klines for months back (no bot needed) to test depth/volatility thresholds on a sample
+  10–50× larger before any change to the entry logic.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

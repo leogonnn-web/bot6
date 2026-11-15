@@ -130,6 +130,12 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   Telegram contact point, env `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`); `alert_rules.yml` + `rule_files` removed;
   `hydra_slippage_pct`, its rules and panel removed; new `DustHigh` (> 1.5 USDT, 30 m) and `BotDown` (`up==0`);
   `ScanCyclesStopped` gated on IDLE/SCANNING. Open until a test alert is delivered on the server.
+  Deploy 2026-11-08/15: Grafana crash-looped on `cannot unmarshal number into ... Config.chatid of type string` —
+  provisioning expands env vars *after* YAML parsing and re-types an all-digit value to int64 (grafana/grafana#69950),
+  so quoting (9cc7569) did nothing; `chatid: |` block scalar (157c06e) fixes it. Server now: Grafana up, contact point
+  `telegram` + 9 rules provisioned and healthy. **Still open:** the delivery test returns `401 Unauthorized` — Telegram
+  `getMe` rejects the `TELEGRAM_BOT_TOKEN` in the server `.env` (well-formed, but revoked or mistyped). Operator: put a
+  valid BotFather token into `~/triada/.env`, recreate grafana, re-run the delivery test.
 
 - [x] B-24 **Breakeven sold the gross fill and looped with no TP** (demo stage 2, 2026-10-19, QNT): Bybit takes the
   buy fee in the coin (bought 0.03, held 0.02997); the grid mirrors the gross fill into `amount`. `_set_breakeven`
@@ -188,6 +194,14 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   Only guards today: `symbol_cooldown` 90 s and the global `cooldown_after_loss_minutes`. → **TZ-22**: per-symbol lockout from
   `trades.db` (after a panic 3 h; ≥ 2 losses in 6 h → 12 h; ≤ 3 entries per symbol per 6 h), checked first in
   `_validate_candidate`, `reject_reason='symbol_lockout'`, retro-run over the server DB as the acceptance test.
+- [ ] B-34 **Stale state file orphans a live position** (found 2026-11-08, demo): the bot was stopped 2026-11-04 in
+  IN_POSITION (17.03 FIL, entry 0.8794, TP 0.8865 resting on the exchange). `_load_state` drops a `hydra_state.json`
+  older than 24 h (`@STATE_STALE@` → IDLE, empty `state_data`) *without* calling `_recover_from_exchange`, which only runs
+  for a fresh file. Result after a restart: nobody manages the position (no stop-loss, no hard exit) and
+  `_single_position_ok` blocks every entry while the coin is on the balance (`@SINGLE_POSITION_BLOCK@`) — the bot idles
+  forever next to a losing position. Fix: for a stale file with a `symbol`, ask the exchange first (open orders /
+  balance above `_dust_threshold`) and adopt the position if it is real; discard only a confirmed ghost. Test in
+  `tests/test_startup_truth.py`. Before Stage 5.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →

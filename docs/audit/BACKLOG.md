@@ -133,9 +133,11 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   Deploy 2026-11-08/15: Grafana crash-looped on `cannot unmarshal number into ... Config.chatid of type string` —
   provisioning expands env vars *after* YAML parsing and re-types an all-digit value to int64 (grafana/grafana#69950),
   so quoting (9cc7569) did nothing; `chatid: |` block scalar (157c06e) fixes it. Server now: Grafana up, contact point
-  `telegram` + 9 rules provisioned and healthy. **Still open:** the delivery test returns `401 Unauthorized` — Telegram
-  `getMe` rejects the `TELEGRAM_BOT_TOKEN` in the server `.env` (well-formed, but revoked or mistyped). Operator: put a
-  valid BotFather token into `~/triada/.env`, recreate grafana, re-run the delivery test.
+  `telegram` + 9 rules provisioned and healthy. The first delivery test returned `401 Unauthorized`: the bot token in
+  the server `.env` was dead (`getMe` 401). Token replaced 2026-11-15 → delivery test through the contact point `ok`.
+  The Alertmanager keeps the pre-provisioning config for a few seconds after a restart (one `Notify for alerts failed`
+  401 at +7 s with the old token); the next group flush, 5 min later, logged no failure. Left: operator confirms the
+  test message and the real `BotDown` alert in Telegram, then tick the box.
 
 - [x] B-24 **Breakeven sold the gross fill and looped with no TP** (demo stage 2, 2026-10-19, QNT): Bybit takes the
   buy fee in the coin (bought 0.03, held 0.02997); the grid mirrors the gross fill into `amount`. `_set_breakeven`

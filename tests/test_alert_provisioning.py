@@ -63,6 +63,18 @@ def test_bot_token_is_passed_through_verbatim():
     assert settings['bottoken'] == '123456:abc-DEF'
 
 
+def test_quantile_rules_drop_nan():
+    """histogram_quantile over a window with no observations is NaN, and Grafana
+    fires on NaN: OrderLatencyHigh alerted for a day (2026-11-16) on sides that
+    simply had no orders in 5 minutes. A trailing comparison filters NaN out."""
+    doc = yaml.safe_load(open(PATH, encoding='utf-8'))
+    exprs = [d['model']['expr'] for g in doc['groups'] for r in g['rules'] for d in r['data'] if 'expr' in d['model']]
+    quantiles = [e for e in exprs if 'histogram_quantile' in e]
+    assert quantiles
+    for e in quantiles:
+        assert re.search(r'\)\s*>=\s*0\s*$', e), e
+
+
 def test_every_rule_has_condition_and_data():
     doc = yaml.safe_load(open(PATH, encoding='utf-8'))
     assert doc['apiVersion'] == 1

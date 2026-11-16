@@ -160,10 +160,13 @@ groups:
           # ">= 0" drops NaN: a side with no orders in the window has a 0/0
           # quantile, and Grafana fires on NaN (any non-zero value). It spammed
           # Telegram for a day on 2026-11-16 while the real p95 was under 0.1 s.
+          # "or ... * 0" keeps an idle side at 0 instead of no data: an alert
+          # that resolves through NoData is sent with the description template
+          # unrendered.
           - refId: A
             relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: PBFA97CFB590B2093
-            model: { refId: A, expr: 'histogram_quantile(0.95, sum by (le, side) (rate(hydra_order_latency_seconds_bucket[5m]))) >= 0', instant: true }
+            model: { refId: A, expr: '(histogram_quantile(0.95, sum by (le, side) (rate(hydra_order_latency_seconds_bucket[5m]))) >= 0) or sum by (side) (rate(hydra_order_latency_seconds_count[5m])) * 0', instant: true }
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [5] } }] }

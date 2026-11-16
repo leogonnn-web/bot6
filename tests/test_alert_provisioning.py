@@ -66,13 +66,15 @@ def test_bot_token_is_passed_through_verbatim():
 def test_quantile_rules_drop_nan():
     """histogram_quantile over a window with no observations is NaN, and Grafana
     fires on NaN: OrderLatencyHigh alerted for a day (2026-11-16) on sides that
-    simply had no orders in 5 minutes. A trailing comparison filters NaN out."""
+    simply had no orders in 5 minutes. A comparison right after the quantile
+    filters NaN out; the `or ... * 0` fallback keeps the idle side at 0, because
+    an alert resolved through NoData is delivered with its template unrendered."""
     doc = yaml.safe_load(open(PATH, encoding='utf-8'))
     exprs = [d['model']['expr'] for g in doc['groups'] for r in g['rules'] for d in r['data'] if 'expr' in d['model']]
     quantiles = [e for e in exprs if 'histogram_quantile' in e]
     assert quantiles
     for e in quantiles:
-        assert re.search(r'\)\s*>=\s*0\s*$', e), e
+        assert re.search(r'\)\s*>=\s*0\)\s+or\s+.+\*\s*0\s*$', e), e
 
 
 def test_every_rule_has_condition_and_data():

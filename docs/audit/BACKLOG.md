@@ -239,6 +239,20 @@ Format: `- [ ] <id> <what> — <where> — <why deferred / decision>`
   `vol_decay`, `higher_low`, `sell_ratio` exist but are never written (0 of 24 221). Next: the trigger can be
   rebuilt from public 1m klines for months back (no bot needed) to test depth/volatility thresholds on a sample
   10–50× larger before any change to the entry logic.
+  **Loss anatomy 2026-11-16, `scripts/analysis/loss_anatomy.py`** (241 round trips incl. 52 after the restart;
+  hourly futures context and the liquidation journal borrowed from the operator's coin-scanner project):
+  net −4.08 on 1992 USDT bought, fees ≈ 3.98. The loss is concentrated: 35 stop-size trades (≤ −1%, 15%) lost
+  −6.19, the other 206 made +2.10. 29 of the 35 were averaged: level 1 at −0.8%, then the stop 1.2% under the
+  average on 2.2× the size = −0.18 ≈ 8 average wins. Averaged trades (72): −5.70; single entries (169): +1.61.
+  After the 65 losing exits the price was back above the entry within an hour in 34. What marks a knife (−1.6%
+  within 60 m, 15% of 2177 scan events) is the coin's own 1m volatility: `sigma_60` AUC 0.72 (0.75 / 0.69 by
+  halves), knife rate 6% → 33% from the calmest to the wildest quintile while the chance to reach +0.5% only
+  goes 40% → 60%. Real trades by volatility quartile: −0.008, −0.011, −0.021, −0.028 per trade (stop-size losses
+  4, 8, 10, 13). Grid step, stop and TP are the same fixed % for every coin. Weaker, same sign in both halves:
+  wide spread, hourly turnover spike, coin up over the last 24 h. No information in this sample: dispatcher
+  score (AUC 0.50), BTC 1h/4h/24h, market breadth, OI change, funding, taker share, long/short ratios,
+  liquidations (52 trades covered). Hypothesis to test in the replay before touching the bot: distances in units
+  of the coin's volatility and/or a veto on the wildest coins.
 
 - [x] B-30 **Watchdog restarted a bot with an open grid on a quiet price feed** (demo 2026-10-25 19:11, ZORA):
   `tickers_cache` (>=95% of 127 cached symbols fresh within 10 s) failed 3× in a row → `@HEALTH_CRITICAL@` →
